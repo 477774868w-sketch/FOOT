@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "foot"
+version = "1.0.0"
+description = "A rigorous, dependency-free football (soccer) modelling engine: Dixon-Coles, Elo, market de-vigging, Kelly staking, leak-free backtesting and season simulation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["football", "soccer", "dixon-coles", "poisson", "elo", "betting", "forecasting"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Mathematics",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.scripts]
+foot = "foot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["foot*"]
+
+[tool.setuptools.package-data]
+foot = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint.isort]
+known-first-party = ["foot"]
+known-local-folder = ["support"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RET", "ARG", "PTH", "PL", "RUF"]
+ignore = ["PLR0913", "PLR2004", "PLR0912", "PLR0915"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+disallow_any_explicit = false
