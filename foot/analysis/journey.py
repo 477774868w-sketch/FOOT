@@ -134,6 +134,7 @@ def run_journey(
     pasted: Mapping[str, str] | None = None,
     files: Mapping[str, str | Path | None] | None = None,
     supplements: SupplementSet | None = None,
+    watching: bool = False,
 ) -> JourneyResult:
     """Run one request end to end — the single path both surfaces take.
 
@@ -150,6 +151,7 @@ def run_journey(
         bookmaker=bookmaker,
         quoted_at=quoted_at if quoted_at is not None else as_of,
         supplements=context,
+        watching=watching,
     )
     # Count what the engine could actually see at `as_of`, not what the file
     # contained: a line published after the analysis is read, reported, and not

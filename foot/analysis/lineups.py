@@ -11,8 +11,13 @@ This module therefore plans and records; it never claims a check happened.
 this deployment serves lineups, so the plan stays outstanding unless the
 operator imports the sheets — in which case
 :func:`record_supplied_lineups` turns them into real observations, with a
-verdict justified by what was actually supplied.  Nothing else moves the plan:
-an automatic re-check is never claimed, because none runs here.
+verdict justified by what was actually supplied.
+
+Since :mod:`foot.analysis.watch` exists, a check *can* now be executed — but the
+plan says so only when one is actually running: ``mécanisme`` names the sources
+the engine really holds, and ``suivi en cours`` appears only while
+``foot suivre`` is driving the loop.  A one-shot report never claims a re-check
+it is not performing.
 """
 
 from __future__ import annotations
@@ -120,7 +125,15 @@ class LineupPlan:
     first_check: dt.datetime | None
     second_check: dt.datetime | None
     automatic: bool = False
-    """True only if a live scheduler is wired up; false here, and reported as such."""
+    """True only while a live watcher is actually performing the checks."""
+
+    mechanism: str = ""
+    """What will perform the check, named from what exists — never announced.
+
+    Set by the engine from the lineup sources it really holds, so the sentence
+    printed under « mécanisme » describes this deployment rather than a feature
+    list.  Empty falls back to the plain statement that nothing is running.
+    """
 
     observations: list[LineupObservation] = field(default_factory=list)
     """The current sheet per team — at most one each."""
@@ -130,6 +143,20 @@ class LineupPlan:
 
     impact: LineupImpact | None = None
     impact_reason: str = ""
+
+    def mechanism_line(self) -> str:
+        """One sentence saying who checks, and whether anyone is checking now."""
+        if self.automatic:
+            return (
+                "suivi en cours — les contrôles T−75/T−60 sont exécutés par "
+                "« foot suivre », et chaque tentative est enregistrée"
+            )
+        if self.mechanism:
+            return self.mechanism
+        return (
+            "AUCUN automatisme actif dans ce déploiement — "
+            "le contrôle reste à effectuer manuellement"
+        )
 
     def record(
         self, observation: LineupObservation, *, impact: LineupImpact, reason: str
@@ -197,20 +224,16 @@ class LineupPlan:
             f"  postes surveillés : {', '.join(WATCHED_ROLES)}",
             f"  état           : {self.state()}",
         ]
-        lines.append(
-            "  mécanisme      : "
-            + (
-                "planificateur actif"
-                if self.automatic
-                else "AUCUN automatisme actif dans ce déploiement — "
-                "le contrôle reste à effectuer manuellement"
-            )
-        )
+        lines.append("  mécanisme      : " + self.mechanism_line())
         return "\n".join(lines)
 
 
 def plan_lineup_checks(
-    resolved: ResolvedMatch, as_of: dt.datetime, *, automatic: bool = False
+    resolved: ResolvedMatch,
+    as_of: dt.datetime,
+    *,
+    automatic: bool = False,
+    mechanism: str = "",
 ) -> LineupPlan:
     """Schedule the two checks relative to kickoff.
 
@@ -232,6 +255,7 @@ def plan_lineup_checks(
         first_check=first,
         second_check=second,
         automatic=automatic,
+        mechanism=mechanism,
     )
     if kickoff is not None and as_of > kickoff - dt.timedelta(minutes=75):
         plan.impact_reason = "fenêtre T−75 déjà ouverte au moment de l'analyse"

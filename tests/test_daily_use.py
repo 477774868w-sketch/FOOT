@@ -1,0 +1,404 @@
+"""L'usage quotidien : suivi des compositions, journal, compositions collectées.
+
+Trois parcours que l'opérateur suit réellement, et qui n'existaient pas avant :
+
+* le contrôle T−75/T−60 **exécuté**, avec ses nouvelles tentatives jusqu'au coup
+  d'envoi — horloge et attente injectées, pour que la boucle entière s'exécute en
+  microsecondes plutôt qu'en une heure ;
+* le journal des prévisions, en ajout seul : une révision s'ajoute, rien ne se
+  réécrit ;
+* les feuilles de composition **collectées automatiquement**, qui doivent
+  traverser exactement le même filtre de disponibilité que celles collées à la
+  main — sinon une source automatique verrait plus loin dans le futur qu'un
+  opérateur.
+
+Aucun réseau, aucune clé : les sources sont des doublures qui rendent des
+réponses fixes, comme le ferait une réponse enregistrée.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import tempfile
+from collections.abc import Sequence
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from test_acceptance import _COMP, StubProvider, _controlled_history
+
+from foot.analysis.engine import Engine, EngineConfig
+from foot.analysis.journey import run_journey
+from foot.analysis.ledgerbook import Forecast, ForecastBook, record_run
+from foot.analysis.watch import WatchPlan, due_soon, watch_until_kickoff
+from foot.collect.base import Capability, LineupSource
+from foot.collect.registry import Registry
+from foot.collect.supplements import LineupRow, SupplementSet
+from foot.domain import Fixture
+from foot.provenance import Confidence, Evidence, Source, utcnow
+
+PARIS = ZoneInfo("Europe/Paris")
+KICKOFF = dt.datetime(2026, 9, 14, 20, 45, tzinfo=PARIS)
+_LINE = "Club A - Club B 14/09/2026 20:45"
+
+
+def _fixtures() -> list[Fixture]:
+    return [Fixture("Club A", "Club B", dt.date(2026, 9, 14), competition=_COMP)]
+
+
+class SheetSource:
+    """A lineup source that publishes its sheet at a chosen instant.
+
+    Two knobs, because they are the two things that actually go wrong on a match
+    day: the sheet is not out yet, and the plan does not serve sheets at all.
+    """
+
+    def __init__(
+        self,
+        *,
+        publishes_at: dt.datetime | None,
+        clock: Sequence[dt.datetime] | None = None,
+        players: int = 11,
+    ) -> None:
+        self._publishes_at = publishes_at
+        self._clock = list(clock or [])
+        self._players = players
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        return "doublure-compositions"
+
+    @property
+    def capabilities(self) -> frozenset[Capability]:
+        return frozenset({Capability.LINEUPS})
+
+    def team_sheets(
+        self, fixture: Fixture
+    ) -> tuple[tuple[LineupRow, ...], tuple[Evidence, ...]]:
+        self.calls += 1
+        now = self._clock[min(self.calls - 1, len(self._clock) - 1)] if self._clock else None
+        published = self._publishes_at
+        if published is None or (now is not None and now < published):
+            return ((), ())
+        rows = tuple(
+            LineupRow(
+                date=fixture.date,
+                published_at=published,
+                team=team,
+                player=f"{team} joueur {index}",
+                role="gardien" if index == 1 else "milieu",
+                starting=True,
+                opponent=fixture.away if team == fixture.home else fixture.home,
+                source="doublure-compositions",
+                status=Confidence.CONFIRMED,
+            )
+            for team in (fixture.home, fixture.away)
+            for index in range(1, self._players + 1)
+        )
+        note = Evidence(
+            key="composition::doublure",
+            value=f"{len(rows)} joueur(s)",
+            source=Source(name="doublure", provider="test", url="", official=False),
+            retrieved_at=published,
+            status=Confidence.CONFIRMED,
+            fact_date=fixture.date,
+        )
+        return (rows, (note,))
+
+
+def _engine(*extra: object) -> Engine:
+    stub = StubProvider(_controlled_history(), _fixtures())
+    return Engine(
+        Registry([stub, *extra]),  # type: ignore[list-item]
+        config=EngineConfig(seasons=("2026-27",), min_matches=40),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 1. Le contrôle T−75/T−60 est réellement exécuté
+# --------------------------------------------------------------------------- #
+
+
+def test_the_watch_retries_until_the_sheet_is_published() -> None:
+    """Une feuille absente à T−75 doit être retrouvée quelques minutes plus tard."""
+    published = KICKOFF - dt.timedelta(minutes=52)
+    source = SheetSource(publishes_at=published)
+    plan = WatchPlan(kickoff=KICKOFF, retry_every=dt.timedelta(minutes=5))
+    ticks = iter(plan.due_times())
+    current = {"now": plan.due_times()[0]}
+
+    def clock() -> dt.datetime:
+        return current["now"]
+
+    def sleep(_seconds: float) -> None:
+        current["now"] = next(ticks, KICKOFF)
+
+    # The first tick is consumed by the initial position of the clock.
+    next(ticks)
+    report = watch_until_kickoff(
+        _engine(source),
+        matches=_LINE,
+        plan=plan,
+        now=clock,
+        sleep=sleep,
+    )
+    assert source.calls >= 3, "la boucle doit réessayer après un T−75 infructueux"
+    success = report.last_success
+    assert success is not None, "la feuille publiée à T−52 doit finir par être vue"
+    assert success.sheets == 22
+    assert success.at >= published
+    assert "DERNIÈRE VÉRIFICATION RÉUSSIE" in report.render()
+    assert report.stopped_because
+
+
+def test_a_watch_that_never_finds_a_sheet_says_so_instead_of_inventing_one() -> None:
+    """« aucune vérification réussie » est une information, pas un silence."""
+    plan = WatchPlan(kickoff=KICKOFF, retry_every=dt.timedelta(minutes=20))
+    current = {"now": KICKOFF - dt.timedelta(minutes=75)}
+
+    def clock() -> dt.datetime:
+        return current["now"]
+
+    def sleep(seconds: float) -> None:
+        current["now"] = current["now"] + dt.timedelta(seconds=max(seconds, 60))
+
+    report = watch_until_kickoff(
+        _engine(SheetSource(publishes_at=None)),
+        matches=_LINE,
+        plan=plan,
+        now=clock,
+        sleep=sleep,
+    )
+    assert report.last_success is None
+    rendered = report.render()
+    assert "DERNIÈRE VÉRIFICATION RÉUSSIE : aucune" in rendered
+    assert "n'ont pas été publiées" in rendered
+    assert report.attempts, "les tentatives infructueuses restent inscrites"
+
+
+def test_the_watch_stops_at_kickoff() -> None:
+    """Une lecture prématch ne doit jamais continuer après le coup d'envoi."""
+    plan = WatchPlan(kickoff=KICKOFF)
+    report = watch_until_kickoff(
+        _engine(),
+        matches=_LINE,
+        plan=plan,
+        now=lambda: KICKOFF + dt.timedelta(minutes=1),
+        sleep=lambda _s: None,
+    )
+    assert report.attempts == []
+    assert report.stopped_because == "coup d'envoi passé"
+
+
+def test_the_due_times_cover_the_whole_window_without_overrunning_it() -> None:
+    plan = WatchPlan(kickoff=KICKOFF, retry_every=dt.timedelta(minutes=10))
+    moments = plan.due_times()
+    assert moments[0] == KICKOFF - dt.timedelta(minutes=75)
+    assert moments[1] == KICKOFF - dt.timedelta(minutes=60)
+    assert all(moment < KICKOFF for moment in moments)
+    assert due_soon(plan, now=KICKOFF - dt.timedelta(minutes=76))
+    assert not due_soon(plan, now=KICKOFF - dt.timedelta(hours=4))
+
+
+def test_a_watched_run_says_a_check_is_running_and_a_one_shot_does_not() -> None:
+    """« suivi en cours » ne doit apparaître que pendant un suivi réel."""
+    engine = _engine(SheetSource(publishes_at=None))
+    single = engine.run(_LINE, as_of=KICKOFF - dt.timedelta(days=1))
+    plan = single.analyses[0].lineup_plan
+    assert plan is not None
+    assert "ne lance pas le suivi" in plan.mechanism_line()
+
+    watched = engine.run(
+        _LINE, as_of=KICKOFF - dt.timedelta(minutes=70), watching=True
+    )
+    live = watched.analyses[0].lineup_plan
+    assert live is not None
+    assert "suivi en cours" in live.mechanism_line()
+
+
+def test_without_a_sheet_source_the_report_refuses_to_promise_a_check() -> None:
+    run = _engine().run(_LINE, as_of=KICKOFF - dt.timedelta(days=1))
+    plan = run.analyses[0].lineup_plan
+    assert plan is not None
+    line = plan.mechanism_line()
+    assert "AUCUN automatisme actif" in line
+    assert "--compositions-csv" in line
+
+
+# --------------------------------------------------------------------------- #
+# 2. Les compositions collectées passent par la même porte que les collées
+# --------------------------------------------------------------------------- #
+
+
+def test_a_collected_sheet_reaches_the_lineup_plan() -> None:
+    source = SheetSource(publishes_at=KICKOFF - dt.timedelta(minutes=70))
+    run = _engine(source).run(_LINE, as_of=KICKOFF - dt.timedelta(minutes=65))
+    plan = run.analyses[0].lineup_plan
+    assert plan is not None
+    assert source.calls == 1
+    assert sum(o.starters for o in plan.observations) == 22
+    assert "À FAIRE" not in plan.state()
+
+
+def test_a_collected_sheet_published_after_the_analysis_is_not_used() -> None:
+    """Une source automatique ne doit pas voir plus loin qu'un opérateur."""
+    source = SheetSource(publishes_at=KICKOFF - dt.timedelta(minutes=70))
+    run = _engine(source).run(_LINE, as_of=KICKOFF - dt.timedelta(hours=6))
+    plan = run.analyses[0].lineup_plan
+    assert plan is not None
+    assert source.calls == 1, "la source est bien interrogée"
+    assert not plan.observations, "mais sa feuille est postérieure à l'analyse"
+    assert "À FAIRE" in plan.state()
+
+
+def test_a_source_that_raises_does_not_stop_the_analysis() -> None:
+    class Broken:
+        @property
+        def name(self) -> str:
+            return "cassée"
+
+        @property
+        def capabilities(self) -> frozenset[Capability]:
+            return frozenset({Capability.LINEUPS})
+
+        def team_sheets(self, fixture: Fixture) -> tuple[tuple[()], tuple[()]]:
+            raise RuntimeError(f"503 du fournisseur pour {fixture.home}")
+
+    run = _engine(Broken()).run(_LINE, as_of=KICKOFF - dt.timedelta(days=1))
+    assert run.analyses[0].analysed, "une source cassée ne condamne pas la rencontre"
+
+
+def test_an_operator_sheet_keeps_the_tie_against_a_collected_one() -> None:
+    """Une feuille saisie à la main est un acte délibéré : à heure égale, elle tient."""
+    published = KICKOFF - dt.timedelta(minutes=70)
+    typed = LineupRow(
+        date=dt.date(2026, 9, 14),
+        published_at=published,
+        team="Club A",
+        player="Club A joueur 1",
+        role="gardien",
+        starting=True,
+        opponent="Club B",
+        source="saisie opérateur",
+        status=Confidence.CONFIRMED,
+    )
+    source = SheetSource(publishes_at=published)
+    run = _engine(source).run(
+        _LINE,
+        as_of=KICKOFF - dt.timedelta(minutes=65),
+        supplements=SupplementSet(lineups=(typed,)),
+    )
+    plan = run.analyses[0].lineup_plan
+    assert plan is not None
+    home = next(o for o in plan.observations if o.team == "Club A")
+    assert home.source == "saisie opérateur", (
+        "à heure de publication égale, la feuille de l'opérateur n'est pas remplacée"
+    )
+    assert home.starters == 1, "et elle n'est pas complétée par une autre source"
+    away = next(o for o in plan.observations if o.team == "Club B")
+    assert away.starters == 11, "l'autre équipe, elle, est bien collectée"
+
+
+def test_the_protocol_contract_is_what_the_engine_depends_on() -> None:
+    assert isinstance(SheetSource(publishes_at=None), LineupSource)
+
+
+# --------------------------------------------------------------------------- #
+# 3. Le journal des prévisions
+# --------------------------------------------------------------------------- #
+
+
+def test_a_forecast_survives_a_round_trip_through_the_journal() -> None:
+    with tempfile.TemporaryDirectory() as folder:
+        book = ForecastBook(Path(folder) / "journal.jsonl")
+        as_of = KICKOFF - dt.timedelta(days=1)
+        result = run_journey(_engine(), matches=_LINE, as_of=as_of)
+        written = record_run(result.run.analyses, book=book, as_of=as_of)
+        assert len(written) == 1
+        (back,) = list(book)
+        assert back.home == "Club A"
+        assert back.fingerprint == written[0].fingerprint
+        assert abs(sum(back.probabilities) - 1.0) < 1e-9
+        assert back.model_version
+
+
+def test_a_revision_is_appended_and_never_replaces_the_first_forecast() -> None:
+    """Mesurer une prévision exige qu'elle ne bouge plus après coup."""
+    with tempfile.TemporaryDirectory() as folder:
+        book = ForecastBook(Path(folder) / "journal.jsonl")
+        first_at = KICKOFF - dt.timedelta(days=1)
+        first = run_journey(_engine(), matches=_LINE, as_of=first_at)
+        record_run(first.run.analyses, book=book, as_of=first_at, reason="J−1")
+
+        later_at = KICKOFF - dt.timedelta(minutes=65)
+        source = SheetSource(publishes_at=KICKOFF - dt.timedelta(minutes=70))
+        second = run_journey(_engine(source), matches=_LINE, as_of=later_at)
+        record_run(
+            second.run.analyses, book=book, as_of=later_at, reason="composition"
+        )
+
+        history = book.history_for((_COMP, "Club A", "Club B"))
+        assert len(history) == 2, "la révision s'ajoute, elle ne remplace pas"
+        assert history[0].reason == "J−1"
+        assert history[1].reason == "composition"
+        assert history[1].supersedes == history[0].fingerprint
+        assert history[0].fingerprint != history[1].fingerprint
+        latest = book.latest_for((_COMP, "Club A", "Club B"))
+        assert latest is not None and latest.reason == "composition"
+
+
+def test_the_journal_has_no_way_to_edit_or_delete_a_line() -> None:
+    """L'absence d'écriture arrière est une propriété, pas un oubli."""
+    for forbidden in ("update", "delete", "replace", "edit", "remove"):
+        assert not hasattr(ForecastBook, forbidden)
+
+
+def test_a_match_that_could_not_be_analysed_is_not_journalled() -> None:
+    """Une prévision vide polluerait la calibration : on n'en écrit pas."""
+    with tempfile.TemporaryDirectory() as folder:
+        book = ForecastBook(Path(folder) / "journal.jsonl")
+        as_of = KICKOFF - dt.timedelta(days=1)
+        result = run_journey(
+            _engine(), matches="Club Inconnu - Autre Inconnu", as_of=as_of
+        )
+        written = record_run(result.run.analyses, book=book, as_of=as_of)
+        assert written == ()
+        assert len(book) == 0
+
+
+def test_the_journal_keeps_the_price_and_its_real_hour() -> None:
+    """Mesurer une décision exige de savoir à quel prix elle a été prise."""
+    with tempfile.TemporaryDirectory() as folder:
+        book = ForecastBook(Path(folder) / "journal.jsonl")
+        as_of = KICKOFF - dt.timedelta(hours=6)
+        quoted = as_of - dt.timedelta(hours=2)
+        result = run_journey(
+            _engine(),
+            matches=f"{_LINE} @ 2.10 3.40 3.60",
+            as_of=as_of,
+            bookmaker="Doublure",
+            quoted_at=quoted,
+        )
+        (entry,) = record_run(result.run.analyses, book=book, as_of=as_of)
+        if entry.odds is not None:
+            assert entry.bookmaker == "Doublure"
+            assert entry.quoted_at.startswith(quoted.isoformat()[:16])
+        assert entry.decision, "la décision est toujours consignée, même « aucun pari »"
+
+
+def test_a_corrupt_journal_line_does_not_crash_the_measurement() -> None:
+    line = Forecast(
+        recorded_at=utcnow(),
+        as_of=utcnow(),
+        competition=_COMP,
+        home="Club A",
+        away="Club B",
+        kickoff="",
+        fingerprint="abc",
+        probabilities=(0.4, 0.3, 0.3),
+        expected_goals=(1.4, 1.1),
+        model_version="x",
+    ).to_json()
+    assert Forecast.from_json(line).probabilities == (0.4, 0.3, 0.3)
+    truncated = line.replace('"probabilities": [0.4, 0.3, 0.3]', '"probabilities": [0.4]')
+    assert Forecast.from_json(truncated).probabilities == (0.4, 0.0, 0.0)

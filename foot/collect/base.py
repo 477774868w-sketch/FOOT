@@ -12,11 +12,12 @@ network call and never see a URL.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
+from foot.collect.supplements import LineupRow
 from foot.domain import Fixture, MatchLog
 from foot.market.odds import MatchOdds
 from foot.provenance import Evidence, Source, utcnow
@@ -24,6 +25,8 @@ from foot.provenance import Evidence, Source, utcnow
 __all__ = [
     "Capability",
     "CollectionError",
+    "LineupSource",
+    "MarketSource",
     "OddsSource",
     "Provider",
     "ProviderBlockedError",
@@ -165,6 +168,54 @@ class SeasonSource(Protocol):
 
     def season(self, competition: str, season: str) -> SeasonData:
         """Results and remaining fixtures for one competition-season."""
+
+
+@runtime_checkable
+class LineupSource(Protocol):
+    """A provider that can serve **team sheets for one fixture**.
+
+    Kept apart from :class:`SeasonSource` because a sheet is not season data: it
+    appears an hour before kick-off, it can be probable then official, and it is
+    the one datum the engine must be able to re-read *during* a run rather than
+    once at the start.
+
+    What comes back is exactly what a pasted ``--compositions-csv`` produces, so
+    an automatically collected sheet and a hand-typed one travel the same road
+    through the cut, the scenarios and the rubrics.  A source that has nothing
+    returns no row and says so in its evidence — « rien publié » and « ce plan
+    ne le sert pas » are different answers and both are worth reading.
+    """
+
+    @property
+    def name(self) -> str:
+        """Identifier used in reports."""
+
+    def team_sheets(
+        self, fixture: Fixture
+    ) -> tuple[Sequence[LineupRow], Sequence[Evidence]]:
+        """Sheets known for one fixture, with the evidence that found them."""
+
+
+@runtime_checkable
+class MarketSource(Protocol):
+    """A provider that can quote **several markets**, each with its own price.
+
+    Broader than :class:`OddsSource`, which only carries 1–N–2. A source that
+    also quotes totals and handicaps can feed the whole comparison, and every
+    price arrives with the bookmaker that gave it and the instant it was seen —
+    the two facts the selector cannot do without.
+
+    Consulted only after the sport dossier is sealed, like any price source.
+    """
+
+    @property
+    def name(self) -> str:
+        """Identifier used in reports."""
+
+    def market_prices(
+        self, fixture: Fixture
+    ) -> Mapping[str, tuple[float, dt.datetime | None, str]]:
+        """``{clé de marché: (cote, heure de relevé, bookmaker)}`` for one fixture."""
 
 
 @runtime_checkable

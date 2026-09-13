@@ -17,8 +17,10 @@ from pathlib import Path
 from foot import __version__
 from foot.analysis.engine import Engine, EngineConfig
 from foot.analysis.journey import JourneyResult, run_journey
+from foot.analysis.ledgerbook import DEFAULT_BOOK, ForecastBook, record_run
 from foot.analysis.request import DEFAULT_TIMEZONE, resolve_timezone
 from foot.analysis.rubrics import RUBRICS
+from foot.analysis.watch import WatchPlan, watch_until_kickoff
 from foot.collect import (
     Cache,
     FootballDataProvider,
@@ -27,6 +29,20 @@ from foot.collect import (
     Provider,
     Registry,
 )
+from foot.collect.base import CollectionError, ProviderStatus, Reachability
+from foot.collect.catalogue import (
+    PROVIDER_CATALOGUE,
+    CatalogueEntry,
+    CatalogueReport,
+)
+from foot.collect.credentials import (
+    CREDENTIALS_FILE,
+    describe,
+    load_credentials,
+    sample_file,
+)
+from foot.collect.footballdata_org import FootballDataOrgProvider
+from foot.collect.oddsapi import OddsApiProvider
 from foot.data.csv_source import load_matches
 from foot.data.synthetic import LeagueTruth, synthetic_league, synthetic_odds
 from foot.domain import Fixture, MatchLog
@@ -47,6 +63,7 @@ from foot.market.odds import MatchOdds
 from foot.markets.portfolio import build_ticket, plan_stakes
 from foot.models.dixon_coles import DixonColesModel
 from foot.models.poisson import PoissonModel
+from foot.provenance import utcnow
 from foot.ratings.elo import EloRatingSystem
 from foot.report.card import render_card, render_rubric_grid
 from foot.report.table import render_summary
@@ -420,6 +437,15 @@ def _build_registry(args: argparse.Namespace) -> Registry:
         OpenFootballProvider(cache),
         FootballDataProvider(cache),
     ]
+    # Keyed providers join only when their key is configured. A missing key is
+    # not an error: it removes one source and leaves everything else working.
+    load_credentials()
+    api = FootballDataOrgProvider(cache)
+    if api.configured:
+        providers.append(api)  # type: ignore[arg-type]
+    odds = OddsApiProvider(cache, bookmaker=getattr(args, "bookmaker", "") or "")
+    if odds.configured:
+        providers.append(odds)  # type: ignore[arg-type]
     results_csv = getattr(args, "resultats_csv", None)
     odds_csv = getattr(args, "cotes_csv", None)
     fixtures_csv = getattr(args, "calendrier_csv", None)
@@ -545,13 +571,118 @@ def command_analyser(
     print()
     print(_heading("FOURNISSEURS"))
     print(run.registry_report.render())
+    journal = getattr(args, "journal", None)
+    if journal:
+        book = ForecastBook(journal)
+        written = record_run(
+            run.analyses, book=book, as_of=as_of, reason=getattr(args, "motif", "") or ""
+        )
+        print()
+        print(
+            f"Journal : {len(written)} prévision(s) ajoutée(s) à {book.path}. "
+            f"Rien n'y est jamais réécrit."
+        )
     return 0
 
 
 def command_fournisseurs(args: argparse.Namespace) -> int:
     """Probe every provider and report what is actually reachable."""
+    load_credentials()
     print(_heading("FOURNISSEURS — état mesuré, non déclaré"))
     print(_build_registry(args).probe().render())
+    if getattr(args, "couverture", False):
+        print()
+        print(_heading("COUVERTURE, COÛT ET ACCÈS RÉEL"))
+        print(_catalogue_report(args).render())
+    return 0
+
+
+def _catalogue_report(args: argparse.Namespace) -> CatalogueReport:
+    """Probe each catalogued provider, so the table shows measurements.
+
+    A card alone is documentation. What makes the table worth printing is the
+    probe beside it: the same provider can be listed, reachable, and still not
+    serve — on this plan — the capability it is listed for.
+    """
+    cache = None if getattr(args, "no_cache", False) else Cache(
+        getattr(args, "cache", ".foot-cache"), ttl_seconds=600.0
+    )
+    probes: dict[str, ProviderStatus] = {}
+    if FootballDataOrgProvider(cache).configured:
+        probes["football-data-org"] = FootballDataOrgProvider(cache).probe()
+    if OddsApiProvider(cache).configured:
+        probes["the-odds-api"] = OddsApiProvider(cache).probe()
+    for key, provider in (
+        ("openfootball", OpenFootballProvider(cache)),
+        ("football-data-uk", FootballDataProvider(cache)),
+    ):
+        try:
+            probes[key] = provider.probe()
+        except CollectionError as error:  # pragma: no cover - network shape
+            probes[key] = ProviderStatus(
+                provider=provider.name,
+                reachability=Reachability.ERROR,
+                capabilities=frozenset(),
+                checked_at=utcnow(),
+                detail=str(error),
+            )
+    entries: list[CatalogueEntry] = []
+    for card in PROVIDER_CATALOGUE:
+        status = probes.get(card.key)
+        entries.append(
+            CatalogueEntry(
+                card=card,
+                reachability=status.reachability if status else None,
+                detail=status.detail if status else "",
+                observed=status.capabilities if status else frozenset(),
+                checked_at=status.checked_at if status else None,
+            )
+        )
+    return CatalogueReport(entries=tuple(entries))
+
+
+def command_config(args: argparse.Namespace) -> int:
+    """Show which API keys are configured — never their values."""
+    load_credentials()
+    expected = {
+        card.credential: f"{card.name} — {card.cost.render()}"
+        for card in PROVIDER_CATALOGUE
+        if card.credential
+    }
+    print(_heading("CLÉS D'API"))
+    print(
+        "Une clé absente ne bloque rien : son fournisseur est marqué « clé à\n"
+        "fournir », et tout ce qui n'en dépend pas continue de fonctionner.\n"
+    )
+    for status in describe(expected):
+        print(status.render())
+    print()
+    print("Ce que chaque clé débloque, et ce qu'elle coûte :")
+    for card in PROVIDER_CATALOGUE:
+        if not card.credential:
+            continue
+        served = ", ".join(sorted(c.value for c in card.declared))
+        print(f"  {card.credential}")
+        print(f"      {card.name} · {served}")
+        print(f"      {card.cost.render()}")
+        print(f"      {card.homepage}")
+    if getattr(args, "modele", False):
+        path = Path(CREDENTIALS_FILE)
+        if path.exists():
+            print(f"\n{path} existe déjà : rien n'a été écrit.")
+        else:
+            path.write_text(sample_file(expected), encoding="utf-8")
+            print(f"\n{path} créé. Renseignez les clés voulues, laissez le reste vide.")
+    else:
+        print(
+            f"\nPour créer un modèle de fichier local : foot config --modele\n"
+            f"(le fichier {CREDENTIALS_FILE} est ignoré par git ; "
+            f"n'y mettez jamais de clé dans un commit)"
+        )
+    print(
+        "\nAucun engagement payant n'est pris par ce logiciel. Les prix ci-dessus\n"
+        "sont ceux annoncés par les fournisseurs : vérifiez-les avant de souscrire."
+    )
     return 0
 
 
@@ -600,6 +731,69 @@ def command_web(args: argparse.Namespace) -> int:
         ),
     )
     serve(engine, host=args.hote, port=args.port)
+    return 0
+
+
+def command_suivre(args: argparse.Namespace) -> int:
+    """Watch one fixture from T−75 to kick-off, re-analysing as sheets arrive.
+
+    This is the command the operator starts and leaves running.  It sleeps
+    between checks rather than polling, records every attempt — including the
+    ones that found nothing — and stops the moment an official sheet is in hand.
+    """
+    text = _read_matches(args)
+    zone = resolve_timezone(args.fuseau)
+    kickoff = dt.datetime.fromisoformat(args.coup_denvoi)
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.replace(tzinfo=zone)
+    engine = Engine(
+        _build_registry(args),
+        config=EngineConfig(
+            timezone=args.fuseau,
+            rubrics_path=Path(args.protocole) if args.protocole else None,
+        ),
+    )
+    plan = WatchPlan(
+        kickoff=kickoff,
+        timezone=args.fuseau,
+        retry_every=dt.timedelta(minutes=args.intervalle),
+    )
+    book = ForecastBook(args.journal) if args.journal else None
+    print(_heading("SUIVI DES COMPOSITIONS"))
+    print(f"  contrôles prévus : {', '.join(m.strftime('%H:%M') for m in plan.due_times())}")
+
+    def _record(attempt: object, result: JourneyResult) -> None:
+        print(getattr(attempt, "render", lambda: "")())
+        if book is not None:
+            record_run(
+                result.run.analyses,
+                book=book,
+                as_of=getattr(attempt, "at", dt.datetime.now(zone)),
+                reason="contrôle des compositions",
+            )
+
+    report = watch_until_kickoff(
+        engine,
+        matches=text,
+        plan=plan,
+        bookmaker=args.bookmaker,
+        on_attempt=_record,
+    )
+    print()
+    print(report.render())
+    return 0
+
+
+def command_journal(args: argparse.Namespace) -> int:
+    """Read back the forecast journal — the only honest basis for measurement."""
+    book = ForecastBook(args.fichier)
+    print(_heading("JOURNAL DES PRÉVISIONS"))
+    print(book.render(limit=args.limite))
+    print()
+    print(
+        "Aucune ligne n'est modifiée après coup : une décision révisée s'ajoute "
+        "en citant celle qu'elle remplace."
+    )
     return 0
 
 
@@ -722,14 +916,66 @@ def build_parser() -> argparse.ArgumentParser:
     analyser.add_argument("--rubriques", action="store_true",
                           help="afficher la grille des 22 rubriques par rencontre")
     analyser.add_argument("--court", action="store_true", help="fiches abrégées")
+    analyser.add_argument(
+        "--journal",
+        nargs="?",
+        const=str(DEFAULT_BOOK),
+        help="consigner les prévisions dans un journal en ajout seul",
+    )
+    analyser.add_argument("--motif", help="raison de cette exécution, portée au journal")
     _data_options(analyser)
     analyser.set_defaults(handler=command_analyser)
+
+    suivre = subparsers.add_parser(
+        "suivre",
+        help="contrôler les compositions de T−75 au coup d'envoi et réanalyser",
+    )
+    suivre.add_argument("rencontres", nargs="*", help="une rencontre par argument")
+    suivre.add_argument("--fichier", help="fichier texte, une rencontre par ligne")
+    suivre.add_argument(
+        "--coup-denvoi", required=True, help="heure du coup d'envoi, format ISO"
+    )
+    suivre.add_argument("--fuseau", default=DEFAULT_TIMEZONE, help="fuseau horaire")
+    suivre.add_argument("--bookmaker", help="bookmaker retenu pour les cotes")
+    suivre.add_argument(
+        "--intervalle", type=int, default=5, help="minutes entre deux tentatives"
+    )
+    suivre.add_argument(
+        "--journal",
+        nargs="?",
+        const=str(DEFAULT_BOOK),
+        help="consigner chaque révision dans le journal",
+    )
+    _data_options(suivre)
+    suivre.set_defaults(handler=command_suivre)
+
+    journal = subparsers.add_parser(
+        "journal", help="relire les prévisions enregistrées avant match"
+    )
+    journal.add_argument("--fichier", default=str(DEFAULT_BOOK))
+    journal.add_argument("--limite", type=int, default=20)
+    journal.set_defaults(handler=command_journal)
 
     fournisseurs = subparsers.add_parser(
         "fournisseurs", help="sonder les fournisseurs et afficher leur couverture réelle"
     )
     _data_options(fournisseurs)
+    fournisseurs.add_argument(
+        "--couverture",
+        action="store_true",
+        help="afficher aussi la couverture, le coût et ce que votre compte obtient",
+    )
     fournisseurs.set_defaults(handler=command_fournisseurs)
+
+    config = subparsers.add_parser(
+        "config", help="afficher les clés d'API configurées, leur coût et leur effet"
+    )
+    config.add_argument(
+        "--modele",
+        action="store_true",
+        help=f"écrire un {CREDENTIALS_FILE} vide à remplir (jamais committé)",
+    )
+    config.set_defaults(handler=command_config)
 
     rubriques = subparsers.add_parser("rubriques", help="afficher la grille des 22 rubriques")
     rubriques.set_defaults(handler=command_rubriques)

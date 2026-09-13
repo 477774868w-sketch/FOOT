@@ -19,7 +19,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from foot.analysis.absence import combined_impact, describe_absences
@@ -56,10 +56,17 @@ from foot.analysis.rubrics import (
     load_rubrics,
 )
 from foot.analysis.xg import XgBalance
-from foot.collect.base import Capability, OddsSource, SeasonData, SeasonSource
+from foot.collect.base import (
+    Capability,
+    LineupSource,
+    MarketSource,
+    OddsSource,
+    SeasonData,
+    SeasonSource,
+)
 from foot.collect.openfootball import COMPETITIONS, resolve_competition
 from foot.collect.registry import Registry, RegistryReport
-from foot.collect.supplements import FULL_LINEUP, SupplementSet
+from foot.collect.supplements import FULL_LINEUP, LineupRow, SupplementSet
 from foot.data.synthetic import SYNTHETIC_MARKER
 from foot.domain import Fixture, Match, MatchLog, Outcome
 from foot.markets.catalogue import standard_catalogue
@@ -233,6 +240,8 @@ class Engine:
         "_duplicates",
         "_evidence",
         "_labels",
+        "_lineup_sources",
+        "_market_sources",
         "_price_sources",
         "_providers",
         "_registry",
@@ -275,6 +284,20 @@ class Engine:
             if isinstance(provider, OddsSource)
             and Capability.ODDS in provider.capabilities
         )
+        # Sheet sources are sporting information, so they belong to the sport
+        # phase — unlike prices, which are only read once the dossier is sealed.
+        self._lineup_sources: tuple[LineupSource, ...] = tuple(
+            provider
+            for provider in registry
+            if isinstance(provider, LineupSource)
+            and Capability.LINEUPS in getattr(provider, "capabilities", frozenset())
+        )
+        self._market_sources: tuple[MarketSource, ...] = tuple(
+            provider
+            for provider in registry
+            if isinstance(provider, MarketSource)
+            and Capability.ODDS in getattr(provider, "capabilities", frozenset())
+        )
         self._rubrics = _load_grid(self._config.rubrics_path)
 
     @property
@@ -307,6 +330,79 @@ class Engine:
     def _competition_label(self, key: str) -> str:
         return self._labels.get(key) or COMPETITIONS.get(key, key)
 
+    def _lineup_mechanism(self) -> str:
+        """Name what would perform the T−75/T−60 check, from what is really here.
+
+        Two different sentences, because the operator's next move differs: with
+        a sheet source, starting ``foot suivre`` is enough; without one, the
+        loop would run and read nothing, and the sheets have to be pasted.
+        """
+        names = ", ".join(source.name for source in self._lineup_sources)
+        if names:
+            return (
+                f"« foot suivre --coup-denvoi … » interroge {names} à T−75 puis "
+                f"T−60, et réessaie jusqu'au coup d'envoi. Ce rapport-ci est une "
+                f"analyse ponctuelle : il ne lance pas le suivi."
+            )
+        return (
+            "AUCUN automatisme actif dans ce déploiement — aucune source de "
+            "compositions n'est joignable ici, si bien que « foot suivre » "
+            "exécuterait la boucle sans rien avoir à lire. Relevé manuel : "
+            "--compositions-csv, ou le champ Compositions du formulaire."
+        )
+
+    def _collect_sheets(
+        self, fixture: Fixture, supplied: SupplementSet
+    ) -> tuple[SupplementSet, list[Evidence]]:
+        """Ask every lineup source for this fixture's team sheets.
+
+        A sheet is added **whole**, as its own published version — never merged
+        row by row into someone else's.  Mixing two sources' players into one
+        sheet would invent a lineup nobody published, and would split the real
+        one into fragments the version machinery then ranks against each other.
+
+        The operator keeps the tie: when they have already supplied a sheet for
+        a team, published at the same instant or later than the provider's, the
+        provider's copy for that team is not collected.  A genuinely later sheet
+        is collected and supersedes the earlier one, which stays visible as a
+        replaced version — that is the existing rule for revisions, applied to
+        an automatic source exactly as to a manual one.
+
+        A source that raises is skipped, not fatal: an analysis that stops
+        because a sheet endpoint answered 403 an hour before kick-off is worse
+        than one that carries on and says the sheet is missing.
+        """
+        if not self._lineup_sources:
+            return (supplied, [])
+        supplied_until: dict[str, dt.datetime] = {}
+        for row in supplied.lineups:
+            for team in (fixture.home, fixture.away):
+                if not row.concerns(team=team, match_date=fixture.date):
+                    continue
+                moment = row.published_at
+                if moment is None:
+                    supplied_until[team] = dt.datetime.max.replace(tzinfo=dt.timezone.utc)
+                elif moment > supplied_until.get(team, moment - dt.timedelta(seconds=1)):
+                    supplied_until[team] = moment
+        rows: list[LineupRow] = list(supplied.lineups)
+        evidence: list[Evidence] = []
+        for source in self._lineup_sources:
+            try:
+                found, notes = source.team_sheets(fixture)
+            except Exception:  # une source de feuilles cassée n'arrête pas l'analyse
+                continue
+            evidence.extend(notes)
+            for row in found:
+                held = supplied_until.get(row.team)
+                if held is not None and (
+                    row.published_at is None or row.published_at <= held
+                ):
+                    continue
+                rows.append(row)
+        if len(rows) == len(supplied.lineups):
+            return (supplied, evidence)
+        return (replace(supplied, lineups=tuple(rows)), evidence)
+
     # -- Entry point -------------------------------------------------------
     def run(
         self,
@@ -318,6 +414,7 @@ class Engine:
         bookmaker: str | None = None,
         quoted_at: dt.datetime | None = None,
         supplements: SupplementSet | None = None,
+        watching: bool = False,
     ) -> AnalysisRun:
         """Analyse every line of ``text``.
 
@@ -329,6 +426,10 @@ class Engine:
                 rubrics no reachable provider can serve, and are marked as
                 operator-supplied throughout so they are never mistaken for
                 corroborated data.
+            watching: true only when a live watcher — :func:`foot.analysis.watch.
+                watch_until_kickoff` — is driving this run.  It is what lets the
+                report say « suivi en cours » without any one-shot analysis
+                claiming a re-check nobody is performing.
         """
         zone_name = timezone or self._config.timezone
         resolve_timezone(zone_name)  # validated eagerly, so a typo fails loudly
@@ -353,6 +454,7 @@ class Engine:
                     quoted_at=quoted_at,
                     quotes=dict(request.quotes),
                     supplements=supplements or SupplementSet(),
+                    watching=watching,
                 )
             )
         return AnalysisRun(
@@ -608,6 +710,7 @@ class Engine:
         quoted_at: dt.datetime | None,
         quotes: dict[str, float] | None = None,
         supplements: SupplementSet | None = None,
+        watching: bool = False,
     ) -> MatchAnalysis:
         if not resolved.analysable or resolved.fixture is None:
             return MatchAnalysis(resolved=resolved)
@@ -662,6 +765,12 @@ class Engine:
         # the context's own evidence from the set it has just cut, so the ledger
         # and the dossier can never disagree about what was knowable.
         evidence = list(self._evidence.get(resolved.competition_key, ()))
+        # Sheets a provider can serve automatically join the ones the operator
+        # pasted, *before* the cut: collected or typed, a sheet must cross the
+        # same availability filter, or an automatic source would be allowed to
+        # see further into the future than a human one.
+        extra, collected = self._collect_sheets(fixture, extra)
+        evidence.extend(collected)
         # One input, cut once. Everything downstream — estimate, findings,
         # scenarios, lineup check, decision — reads `sport_input`, never the
         # raw history or the raw supplements, so none of them can see further
@@ -680,7 +789,9 @@ class Engine:
         # the seal and fed the sheets the operator actually imported: a report
         # must never show an official lineup in one section and "no lineup
         # recorded" in another.
-        plan = plan_lineup_checks(resolved, as_of)
+        plan = plan_lineup_checks(
+            resolved, as_of, automatic=watching, mechanism=self._lineup_mechanism()
+        )
         record_supplied_lineups(
             plan, fixture=fixture, supplements=known_extra, as_of=as_of
         )
@@ -734,6 +845,18 @@ class Engine:
                     bookmaker=imported_book or bookmaker,
                 ),
             )
+        # Sources that quote several markets at once — an odds API rather than a
+        # 1–N–2 file. Each price arrives with its own hour and its own book, so a
+        # price taken from another bookmaker stays identified as such.
+        for source in self._market_sources:
+            try:
+                quoted = source.market_prices(fixture)
+            except Exception:
+                continue
+            for key, (price, moment, book) in quoted.items():
+                prices.setdefault(
+                    key, Quote(price=price, quoted_at=moment, bookmaker=book)
+                )
         if prices:
             audit.saw_odds(f"{len(prices)} cote(s) fournies par l'opérateur")
             ledger.extend(self._odds_evidence(fixture, prices, as_of))

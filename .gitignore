@@ -8,3 +8,6 @@ dist/
 .pytest_cache/
 .coverage
 .foot-cache/
+
+# Clés d'API locales : ne jamais committer un secret.
+.foot-cles
