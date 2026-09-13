@@ -80,11 +80,14 @@ l'heure déclarée par sa source :
 Dans tous ces cas, les autres marchés correctement cotés restent comparés, et la
 fiche nomme chaque exclusion avec son motif.
 
-### Fournir le contexte que personne ne publie ici
+### Fournir le contexte qu'aucune source active ne sert
 
-Aucune source accessible ne sert les xG, les absences ou les compositions. Vous
-pouvez les fournir, et les rubriques correspondantes passent alors de
-« non renseignée » à « traitée » :
+Ce que vos fournisseurs servent dépend de vos clés, et `foot fournisseurs
+--couverture` le mesure au lieu de le supposer. Sans clé, aucune source ne sert
+xG, absences ni compositions : fournissez-les, et les rubriques correspondantes
+passent de « non renseignée » à « traitée ». Une donnée collée reste marquée
+« fournie par l'opérateur » de bout en bout, et une donnée collectée
+automatiquement traverse exactement le même filtre de disponibilité :
 
 ```console
 $ python3 -m foot analyser --fichier matchs.txt \
@@ -266,8 +269,11 @@ Extrait de la fiche :
 | Commande | Rôle |
 |---|---|
 | `foot analyser` | le parcours principal : rencontres → décisions |
-| `foot web` | la même chose dans le navigateur, en français |
-| `foot fournisseurs` | sonde chaque source et affiche sa **couverture réelle** |
+| `foot web` | la même chose dans le navigateur, en français ; `--jeton` pour un accès privé, `--certificat`/`--cle` pour HTTPS |
+| `foot suivre` | exécute le contrôle T−75/T−60 et réessaie jusqu'au coup d'envoi |
+| `foot journal` | relit les prévisions écrites avant match, jamais réécrites |
+| `foot config` | quelles clés sont posées, ce qu'elles débloquent, ce qu'elles coûtent |
+| `foot fournisseurs` | sonde chaque source ; `--couverture` ajoute coût et accès réel |
 | `foot rubriques` | la grille des 22 rubriques et ce que chacune exige |
 | `foot valider` | validation chronologique sur données réelles |
 
@@ -283,6 +289,8 @@ Options utiles de `analyser` :
 | `--resultats-csv`, `--cotes-csv` | import manuel de résultats et de cotes |
 | `--xg-csv`, `--absences-csv`, `--compositions-csv` | contexte fourni par l'opérateur |
 | `--protocole fichier.json` | remplace la grille des 22 rubriques |
+| `--journal [fichier]` | consigne les prévisions en ajout seul, pour les mesurer plus tard |
+| `--motif "…"` | la raison de cette exécution, portée au journal |
 
 ---
 
@@ -351,8 +359,11 @@ cote d'équilibre par 1,03 est faux dès qu'un remboursement est possible.
   moment de la décision, seule la qualité probabiliste est mesurée.
 - **Il ne cote ni cartons, ni corners, ni buteurs** : ces marchés ne se déduisent
   pas de la loi des scores finaux, et il refuse de les approximer.
-- **Aucun contrôle automatique de compositions n'est actif.** Le rapport écrit
-  « AUCUN automatisme actif — le contrôle reste à effectuer manuellement ».
+- **Le contrôle T−75/T−60 n'est actif que si vous le lancez.** `foot suivre`
+  l'exécute réellement ; une analyse ponctuelle ne le fait pas, et le rapport
+  écrit alors ce qui exécuterait le contrôle plutôt que de le promettre. Sans
+  source de compositions joignable, la boucle tournerait sans rien lire, et la
+  fiche le dit.
 
 ---
 

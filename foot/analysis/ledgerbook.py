@@ -26,7 +26,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from foot.analysis.engine import MatchAnalysis
@@ -86,9 +86,40 @@ class Forecast:
     confidence: str = ""
     sources: tuple[str, ...] = ()
     supersedes: str = ""
-    """Fingerprint of the forecast this one revises, when it revises one."""
+    """Fingerprint of the forecast this one **revises** — set only when the
+    substance changed.  A dossier is dated, so its fingerprint moves every time
+    it is re-sealed; calling that a revision would make a re-run at 19:05 look
+    like a change of mind when nothing changed at all."""
+
+    confirms: str = ""
+    """Fingerprint of the forecast this one **re-confirms**, unchanged.
+
+    Worth keeping rather than dropping: « re-checked at T−60, same call » is a
+    fact about the watch, and its absence would look like the watch stopped.
+    """
 
     reason: str = ""
+
+    def same_call_as(self, other: Forecast) -> bool:
+        """Whether the two forecasts say the same thing about the match.
+
+        Compared on substance — the model's probabilities, the market retained,
+        its price and the confidence — never on the instant they were written.
+        """
+        return (
+            all(
+                abs(a - b) < 5e-4
+                for a, b in zip(self.probabilities, other.probabilities, strict=True)
+            )
+            and all(
+                abs(a - b) < 5e-4
+                for a, b in zip(self.expected_goals, other.expected_goals, strict=True)
+            )
+            and self.decision == other.decision
+            and self.market == other.market
+            and self.odds == other.odds
+            and self.confidence == other.confidence
+        )
 
     def to_json(self) -> str:
         return json.dumps(
@@ -112,6 +143,7 @@ class Forecast:
                 "confidence": self.confidence,
                 "sources": list(self.sources),
                 "supersedes": self.supersedes,
+                "confirms": self.confirms,
                 "reason": self.reason,
             },
             ensure_ascii=False,
@@ -141,6 +173,7 @@ class Forecast:
             confidence=raw.get("confidence", ""),
             sources=tuple(raw.get("sources", ())),
             supersedes=raw.get("supersedes", ""),
+            confirms=raw.get("confirms", ""),
             reason=raw.get("reason", ""),
         )
 
@@ -204,6 +237,8 @@ class ForecastBook:
         for forecast in entries:
             odds = f"{forecast.odds:.2f}" if forecast.odds else "—"
             mark = " (révision)" if forecast.supersedes else ""
+            if forecast.confirms:
+                mark = " (inchangé)"
             lines.append(
                 f"  {forecast.as_of.strftime('%d/%m %H:%M')} "
                 f"{forecast.home} – {forecast.away} · {forecast.decision} · "
@@ -271,12 +306,13 @@ def record_run(
             sources=tuple(
                 sorted({item.source.name for item in dossier.evidence})
             )[:8],
-            supersedes=(
-                previous.fingerprint
-                if previous and previous.fingerprint != analysis.sealed.data_fingerprint
-                else ""
-            ),
             reason=reason,
         )
+        if previous is not None:
+            forecast = (
+                replace(forecast, confirms=previous.fingerprint)
+                if forecast.same_call_as(previous)
+                else replace(forecast, supersedes=previous.fingerprint)
+            )
         written.append(book.append(forecast))
     return tuple(written)

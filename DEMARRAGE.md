@@ -1,6 +1,7 @@
 # Démarrer — 5 minutes
 
 Ce guide sert à **ouvrir l'application et analyser un match**. Rien d'autre.
+Depuis un téléphone, une page suffit : [TELEPHONE.md](TELEPHONE.md).
 Le détail complet est dans [GUIDE.md](GUIDE.md), le protocole dans
 [protocole/](protocole/), l'état réel des fonctions dans [AUDIT.md](AUDIT.md).
 
@@ -21,11 +22,15 @@ Ouvrez **http://127.0.0.1:8000** dans votre navigateur.
 
 > Cette adresse est locale : elle fonctionne sur l'ordinateur qui a lancé la
 > commande. Aucun service en ligne n'est hébergé, et aucune autre URL n'est
-> promise. Pour y accéder **depuis votre téléphone sur le même Wi-Fi**, lancez
-> plutôt `python3 -m foot web --hote 0.0.0.0`, puis ouvrez
-> `http://ADRESSE-DE-L-ORDINATEUR:8000` (l'adresse locale de la machine,
-> du type `192.168.1.x`). N'exposez pas ce port sur Internet : l'interface n'a
-> ni authentification ni chiffrement.
+> promise. Pour y accéder **depuis votre téléphone sur le même Wi-Fi** :
+> `python3 -m foot web --hote 0.0.0.0 --jeton --journal`, puis ouvrez l'adresse
+> complète affichée, jeton compris, en remplaçant `0.0.0.0` par l'adresse
+> locale de la machine (du type `192.168.1.x`). Voir
+> [TELEPHONE.md](TELEPHONE.md).
+>
+> Pour exposer le service au-delà du Wi-Fi, il faut **les deux** : `--jeton`
+> pour l'adresse privée et `--certificat`/`--cle` pour HTTPS. Sans le second,
+> la commande prévient qu'un jeton partirait en clair.
 
 Pour arrêter : `Ctrl+C` dans le terminal.
 
@@ -80,8 +85,11 @@ Les prix peuvent être groupés ou séparés par des `|`, au choix.
 
 ## 4. Ajouter le contexte (xG, absences, compositions)
 
-Aucune source accessible ici ne publie ces données. Si vous les avez,
-dépliez **« Contexte à fournir »** sous le formulaire et collez-les.
+Ce panneau ne sert qu'à ce qu'**aucune source active ne fournit**. La liste des
+fournisseurs, en bas de chaque analyse, dit lesquels le sont ; `python3 -m foot
+fournisseurs --couverture` le dit avant. Sans clé configurée, aucune source ne
+publie xG, absences ni compositions : dépliez alors **« Contexte à coller »**
+sous le formulaire.
 Une ligne d'en-tête, puis une ligne par fait :
 
 ```
@@ -132,14 +140,27 @@ Deux choses à ne pas confondre :
 
 ## 6. Refaire le contrôle des compositions
 
-Le contrôle T−75 / T−60 **n'est pas automatique** : aucun automatisme ne relève
-les compositions ici, et la fiche l'écrit. Pour le faire :
+Le contrôle est **exécuté** par `foot suivre`, qui dort entre les tentatives :
+
+```console
+$ python3 -m foot suivre "it.1 | Napoli - Bologna | 13/09/2026 20:45" \
+    --coup-denvoi 2026-09-13T20:45 --journal
+```
+
+Il relève à T−75 puis T−60, **réessaie toutes les 5 minutes** jusqu'au coup
+d'envoi si rien n'est publié, réanalyse à chaque feuille trouvée, et affiche la
+**dernière vérification réussie**. Chaque tentative infructueuse est inscrite :
+« aucune vérification réussie depuis 40 minutes » est une information.
+
+Encore faut-il qu'une source serve les compositions. Sans clé configurée, la
+boucle tournerait sans rien lire, et la fiche l'écrit noir sur blanc. Dans ce
+cas, à la main :
 
 1. environ une heure avant le coup d'envoi, relevez les compositions
    officielles auprès du club ou de la ligue ;
 2. rouvrez l'application, recollez la même saisie, **mettez la date d'analyse à
    l'heure courante** ;
-3. ajoutez les compositions dans « Contexte à fournir », avec la colonne
+3. ajoutez les compositions dans « Contexte à coller », avec la colonne
    `publication` et l'heure réelle ;
 4. relancez : la fiche indique alors le verdict — **maintenu**, **dégradé**,
    **annulé** ou **amélioré** — et pourquoi.
@@ -161,7 +182,10 @@ $ python3 -m foot analyser \
 Autres commandes utiles :
 
 ```console
-$ python3 -m foot fournisseurs     # que peut-on vraiment atteindre d'ici ?
+$ python3 -m foot config           # quelles clés sont posées, et ce qu'elles coûtent
+$ python3 -m foot fournisseurs --couverture   # ce que votre compte obtient vraiment
+$ python3 -m foot suivre … --coup-denvoi …    # le contrôle T−75/T−60, exécuté
+$ python3 -m foot journal          # les prévisions déjà écrites, jamais réécrites
 $ python3 -m foot valider --competition en.1 --plis 4   # performance mesurée
 $ python3 tests/run_tests.py       # la suite complète, sans rien installer
 ```

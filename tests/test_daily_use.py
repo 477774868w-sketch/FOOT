@@ -341,20 +341,46 @@ def test_a_revision_is_appended_and_never_replaces_the_first_forecast() -> None:
         record_run(first.run.analyses, book=book, as_of=first_at, reason="J−1")
 
         later_at = KICKOFF - dt.timedelta(minutes=65)
-        source = SheetSource(publishes_at=KICKOFF - dt.timedelta(minutes=70))
-        second = run_journey(_engine(source), matches=_LINE, as_of=later_at)
-        record_run(
-            second.run.analyses, book=book, as_of=later_at, reason="composition"
+        second = run_journey(
+            _engine(), matches=f"{_LINE} @ 2.10 3.40 6.00", as_of=later_at
         )
+        record_run(second.run.analyses, book=book, as_of=later_at, reason="cotes")
 
         history = book.history_for((_COMP, "Club A", "Club B"))
         assert len(history) == 2, "la révision s'ajoute, elle ne remplace pas"
         assert history[0].reason == "J−1"
-        assert history[1].reason == "composition"
+        assert history[1].reason == "cotes"
         assert history[1].supersedes == history[0].fingerprint
+        assert not history[1].confirms
         assert history[0].fingerprint != history[1].fingerprint
         latest = book.latest_for((_COMP, "Club A", "Club B"))
-        assert latest is not None and latest.reason == "composition"
+        assert latest is not None and latest.reason == "cotes"
+
+
+def test_an_unchanged_call_is_recorded_as_confirmed_not_as_a_revision() -> None:
+    """Un dossier est daté : son empreinte bouge à chaque relecture.
+
+    Appeler cela « révision » ferait passer un contrôle de routine à T−60 pour un
+    changement d'avis, et rendrait le journal illisible là où il compte le plus.
+    """
+    with tempfile.TemporaryDirectory() as folder:
+        book = ForecastBook(Path(folder) / "journal.jsonl")
+        line = f"{_LINE} @ 2.10 3.40 6.00"
+        first_at = KICKOFF - dt.timedelta(minutes=75)
+        second_at = KICKOFF - dt.timedelta(minutes=60)
+        for moment, why in ((first_at, "T−75"), (second_at, "T−60")):
+            result = run_journey(_engine(), matches=line, as_of=moment)
+            record_run(result.run.analyses, book=book, as_of=moment, reason=why)
+
+        history = book.history_for((_COMP, "Club A", "Club B"))
+        assert len(history) == 2
+        assert history[0].fingerprint != history[1].fingerprint, (
+            "l'empreinte du dossier daté bouge, c'est attendu"
+        )
+        assert history[1].confirms == history[0].fingerprint
+        assert not history[1].supersedes
+        assert "(inchangé)" in book.render()
+        assert "(révision)" not in book.render()
 
 
 def test_the_journal_has_no_way_to_edit_or_delete_a_line() -> None:
