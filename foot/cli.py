@@ -11,11 +11,12 @@ import argparse
 import datetime as dt
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from foot import __version__
 from foot.analysis.engine import Engine, EngineConfig
+from foot.analysis.journey import JourneyResult, run_journey
 from foot.analysis.request import DEFAULT_TIMEZONE, resolve_timezone
 from foot.analysis.rubrics import RUBRICS
 from foot.collect import (
@@ -26,7 +27,6 @@ from foot.collect import (
     Provider,
     Registry,
 )
-from foot.collect.supplements import load_supplements
 from foot.data.csv_source import load_matches
 from foot.data.synthetic import LeagueTruth, synthetic_league, synthetic_odds
 from foot.domain import Fixture, MatchLog
@@ -465,8 +465,24 @@ def _read_matches(args: argparse.Namespace) -> str:
     )
 
 
-def command_analyser(args: argparse.Namespace) -> int:
-    """The main journey: matches in, one decision per match out."""
+def command_analyser(
+    args: argparse.Namespace,
+    *,
+    engine: Engine | None = None,
+    on_result: Callable[[JourneyResult], None] | None = None,
+) -> int:
+    """The main journey: matches in, one decision per match out.
+
+    Goes through :func:`~foot.analysis.journey.run_journey`, exactly like the
+    browser. Loading the context here, separately, is what let the two surfaces
+    read a publication hour in two different timezones.
+
+    Args:
+        engine: injected by tests so the same batch can be compared across
+            surfaces; built from the arguments otherwise.
+        on_result: receives the finished journey, so a caller can inspect what
+            the terminal printed without the command holding global state.
+    """
     text = _read_matches(args)
     zone = resolve_timezone(args.fuseau)
     as_of = (
@@ -474,29 +490,38 @@ def command_analyser(args: argparse.Namespace) -> int:
         if args.date
         else dt.datetime.now(zone)
     )
-    registry = _build_registry(args)
-    engine = Engine(
-        registry,
-        config=EngineConfig(
-            half_life_days=args.demi_vie,
-            timezone=args.fuseau,
-            seasons=tuple(args.saisons),
-            rubrics_path=Path(args.protocole) if args.protocole else None,
-        ),
+    if engine is None:
+        engine = Engine(
+            _build_registry(args),
+            config=EngineConfig(
+                half_life_days=args.demi_vie,
+                timezone=args.fuseau,
+                seasons=tuple(args.saisons),
+                rubrics_path=Path(args.protocole) if args.protocole else None,
+            ),
+        )
+    result = run_journey(
+        engine,
+        matches=text,
+        as_of=as_of,
+        timezone=args.fuseau,
+        bookmaker=args.bookmaker,
+        files={
+            "xg": args.xg_csv,
+            "absences": args.absences_csv,
+            "compositions": args.compositions_csv,
+        },
     )
-    supplements = load_supplements(
-        xg_csv=args.xg_csv,
-        absences_csv=args.absences_csv,
-        lineups_csv=args.compositions_csv,
-    )
-    run = engine.run(
-        text, as_of=as_of, timezone=args.fuseau,
-        bookmaker=args.bookmaker, quoted_at=as_of,
-        supplements=supplements,
-    )
+    run = result.run
+    if on_result is not None:
+        on_result(result)
 
     print(_heading("ANALYSE"))
     print(render_summary(run))
+    context = result.render_context()
+    if context:
+        print()
+        print(context)
     for analysis in run.analyses:
         print()
         print(render_card(analysis, detailed=not args.court))

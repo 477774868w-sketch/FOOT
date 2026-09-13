@@ -444,3 +444,70 @@ nommés ici comme reste-à-faire, pas comme fonctions :
 | Barème d'impact par poste (`ROLE_IMPACTS`) | **hypothèse déclarée** — oriente le canal ; son apport prospectif n'est pas mesuré hors échantillon |
 | Régularisation du ratio buts/xG (`PSEUDO_GOALS = 4`) | **hypothèse déclarée** — non calibrée hors échantillon |
 | Mesure des décisions (rendements, évolution jusqu'à la clôture) | **non fait** — exige des prix relevés avant match et conservés ; aucun fournisseur de cotes n'est accessible ici |
+
+---
+
+## 9. Troisième revue indépendante du commit `8ed1584` — corrections
+
+Les **16 tests** de `tests/test_regression_review3.py` exercent le parcours
+utilisateur — `Engine.run`, `analyse_form`, et la commande `analyser` telle
+qu'un opérateur l'invoque. **11 des 13 premiers échouaient** sur `8ed1584` ;
+les deux autres, `e2c` et `e3c`, gardaient un comportement déjà correct. Les 3
+derniers portent sur des défauts trouvés en vérifiant les corrections.
+
+### 9.1 Défauts reproduits, puis corrigés
+
+| # | Reproduit sur `8ed1584` | Correction | Test |
+|---|---|---|---|
+| 1 | Cote relevée 48 h avant : `Engine.run` gardait l'ancienneté (« aucun pari »), `analyse_form` la ramenait à **zéro** (« recommandé ») | L'âge appartient au **prix**, pas au run : `Quote(price, quoted_at, bookmaker)` porte l'heure et la source de chaque cote jusqu'au sélecteur. Une cote tapée à l'instant et une cote importée de l'avant-veille coexistent sur la même rencontre, chacune avec son vrai âge | `test_e1a–c` |
+| 2 | Onze joueurs probables à 18 h puis les **mêmes** confirmés à 19 h 30 : les onze lignes officielles rejetées comme doublons, feuille restée probable | La déduplication porte sur la **version** de la feuille — `(date, publication, source, statut)` — et non sur le joueur. `lineup_versions()` groupe et **trie**, `lineup_for()` rend la dernière disponible, les précédentes sont enregistrées comme remplacées. Résultat indépendant de l'ordre des lignes | `test_e2a–c` |
+| 3 | Blessure annoncée le 12, retour confirmé le 13, toutes deux connues : `absences_for` gardait la blessure | L'état de chaque joueur est **résolu chronologiquement** avant tout calcul : la dernière déclaration connue à `as_of` décide. Un retour confirmé annule, une rechute ultérieure rétablit. Les déclarations se dédupliquent aussi par version, sinon la ligne du retour disparaissait | `test_e3a–d` |
+| 4 | Fuseau UTC, analyse à 12 h : une absence publiée à 13 h était **exclue** au navigateur et **intégrée** en terminal, la CLI lisant « 13:00 » en Europe/Paris | `foot/analysis/journey.py` : une seule fonction lit les entrées, horodate le contexte et appelle le moteur. `analyse_form` et `command_analyser` l'appellent tous deux — il n'y a plus rien à garder synchronisé, donc plus rien qui puisse diverger | `test_e4a–d` |
+
+### 9.2 Défauts trouvés en vérifiant les corrections
+
+| Défaut | Détection | Correction | Test |
+|---|---|---|---|
+| Le registre de preuves filtrait le contexte par **date** et non par disponibilité : une absence refusée par le dossier y figurait encore comme source | test `e4a`, qui inspecte le registre | `build_sport_input` dérive les preuves du contexte du jeu **déjà coupé** : le registre et le dossier ne peuvent plus se contredire | `test_e4a` |
+| Sans horodatage, une blessure de la veille est admise et le retour du jour ne l'est pas — on retenait l'information défavorable et on écartait la favorable, **du même émetteur**, en silence | lecture de la fiche produite | La règle de disponibilité reste inchangée, elle est juste ; mais `pending_absence_updates()` nomme les déclarations refusées, et la fiche les affiche avec le geste qui les rendrait exploitables | `test_e3e/f` |
+| Le résumé de contexte était formulé différemment au terminal et au navigateur | comparaison des deux sorties | même libellé des deux côtés, produit par `JourneyResult.render_context()` | `test_e4d` |
+| Un message d'erreur de date en **anglais** dans une interface française, affichant des motifs `strptime` | POST réel sur le serveur | message en français nommant des exemples de formats | — |
+
+### 9.3 Avant / après, sur le parcours réel
+
+```
+1. cote importée relevée 48 h avant l'analyse
+   avant   Engine.run   : âge 48 h · aucun pari
+           analyse_form : âge  0 h · recommandé        ← divergence
+   après   Engine.run   : âge 48 h · aucun pari
+           analyse_form : âge 48 h · aucun pari
+
+2. feuille probable (18 h) puis officielle (19 h 30), même onze
+   avant   lignes 11 · rejets 11 · officielle False · remplacées 0
+   après   lignes 22 · rejets  0 · officielle True  · titulaires 11 · remplacées 1
+
+3. blessure 12/09 puis retour confirmé 13/09, horodatés
+   avant   absences actives ['Martin'] · scénario « absences décisives »
+   après   absences actives []         · aucun scénario d'absence
+
+4. fuseau UTC, analyse 12 h, absence publiée à 13 h
+   avant   CLI : intégrée au dossier      formulaire : exclue     ← divergence
+   après   CLI : exclue et signalée       formulaire : exclue et signalée
+```
+
+Lot réel de 3 rencontres (openfootball), joué en terminal puis au navigateur
+avec les mêmes imports : **3 lignes restituées de part et d'autre, empreintes de
+dossier et décisions identiques**, même contexte retenu (4 lignes xG, 2
+absences), aucun rejet. Serveur démarré et interrogé : `GET` et `POST` à 200, le
+contexte retenu et la ligne invalide affichés.
+
+### 9.4 Vérifications
+
+```
+pytest -m "not network"      283 réussis, 1 ignoré, 8 déselectionnés
+pytest -m "network"          8 réussis
+python3 tests/run_tests.py --sans-reseau
+                             283 réussi(s), 0 échec(s), 1 ignoré(s) sur 284
+ruff check .                 propre
+mypy .                       propre, 84 fichiers
+```

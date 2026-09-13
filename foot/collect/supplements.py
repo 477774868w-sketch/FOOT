@@ -182,6 +182,31 @@ class AbsenceRow(_Timed):
     status: Confidence = Confidence.PROBABLE
 
     @property
+    def declares_return(self) -> bool:
+        """Whether this line says the player is available again.
+
+        A return is declared either by the ``retour`` column or by a reason that
+        says so in as many words. Both forms occur in real sources, and reading
+        only the column left a squad list permanently injured.
+        """
+        if self.returned_on is not None:
+            return True
+        return self.reason.strip().lower() in {
+            "retour", "retour confirmé", "retour confirme", "disponible",
+            "rétabli", "retabli", "apte", "return", "available", "fit",
+        }
+
+    @property
+    def effective_from(self) -> dt.date:
+        """The day this declaration starts to describe the player."""
+        return self.returned_on or self.date
+
+    @property
+    def declared_at(self) -> dt.datetime:
+        """When this declaration became public — the key to ordering them."""
+        return self.published_at or _day_after(self.date, DEFAULT_TZ)
+
+    @property
     def decisive(self) -> bool:
         """Whether the position is one the protocol singles out as material."""
         return self.role.strip().lower() in {
@@ -248,6 +273,32 @@ class LineupRow(_Timed):
     def key(self) -> str:
         return f"composition::{self.team}::{self.role or self.player}"
 
+    @property
+    def version(self) -> tuple[dt.date, str, str, bool]:
+        """Which published sheet this row belongs to.
+
+        A team publishes several sheets for one match — a probable eleven, then
+        the official one. Identifying a row by player alone made the second
+        publication look like eleven duplicates of the first, so the official
+        sheet could never replace the probable one.
+        """
+        return (
+            self.date,
+            self.published_at.isoformat() if self.published_at else "",
+            self.source,
+            self.status is Confidence.CONFIRMED,
+        )
+
+    @property
+    def version_order(self) -> tuple[dt.datetime, int]:
+        """Chronological rank of this row's sheet, independent of file order.
+
+        Sheets are ordered by publication instant; an official sheet outranks a
+        probable one published at the same moment, because that is what it is.
+        """
+        moment = self.published_at or _day_after(self.date, DEFAULT_TZ)
+        return (moment, 1 if self.status is Confidence.CONFIRMED else 0)
+
     def concerns(self, *, team: str, match_date: dt.date, opponent: str = "") -> bool:
         """Is this row this team's sheet **for this match**?
 
@@ -311,12 +362,86 @@ class SupplementSet:
         on_or_before: dt.date,
         as_of: dt.datetime | None = None,
     ) -> tuple[AbsenceRow, ...]:
-        """Absences still claimed to hold for ``team`` on the match date."""
-        rows = self.absences
-        if as_of is not None:
-            rows = tuple(row for row in rows if row.available_at(as_of))
+        """Absences still claimed to hold for ``team`` on the match date.
+
+        Each player's state is **resolved chronologically** before anything is
+        counted: keeping every declaration ever filed left a keeper injured on
+        the day his club confirmed his return. The last declaration known at
+        ``as_of`` decides — a confirmed return clears the absence, and a later
+        injury reinstates it.
+        """
+        known = [
+            row
+            for row in self.absences
+            if row.team == team
+            and (as_of is None or row.available_at(as_of))
+            and row.effective_from <= on_or_before
+        ]
+        latest: dict[str, AbsenceRow] = {}
+        for row in sorted(known, key=lambda r: (r.declared_at, r.effective_from)):
+            latest[row.player] = row
         return tuple(
-            row for row in rows if row.team == team and row.holds_on(on_or_before)
+            row
+            for row in latest.values()
+            if not row.declares_return and row.holds_on(on_or_before)
+        )
+
+    def pending_absence_updates(
+        self,
+        team: str,
+        *,
+        on_or_before: dt.date,
+        as_of: dt.datetime,
+    ) -> tuple[AbsenceRow, ...]:
+        """Declarations that would change a player's state but are not yet knowable.
+
+        The availability rule is right to refuse them — an undated line from
+        today is not demonstrably public today. But refusing them *silently* is
+        not: an injury filed yesterday is admitted while the return filed today
+        by the same club is not, so the report asserts an absence its own source
+        has already lifted. Naming these pending lines is what keeps the asymmetry
+        visible instead of letting it pass for a fact.
+        """
+        active = {row.player for row in self.absences_for(
+            team, on_or_before=on_or_before, as_of=as_of
+        )}
+        pending: dict[str, AbsenceRow] = {}
+        for row in sorted(
+            (r for r in self.absences if r.team == team and not r.available_at(as_of)),
+            key=lambda r: r.declared_at,
+        ):
+            if row.declares_return and row.player not in active:
+                continue
+            pending[row.player] = row
+        return tuple(pending.values())
+
+    def lineup_versions(
+        self,
+        team: str,
+        *,
+        match_date: dt.date,
+        opponent: str = "",
+        as_of: dt.datetime | None = None,
+    ) -> tuple[tuple[LineupRow, ...], ...]:
+        """Every sheet published for this team and this fixture, oldest first.
+
+        Grouping by version — and sorting rather than trusting the file — is
+        what makes the result independent of the order the rows were written in.
+        """
+        rows = [
+            row
+            for row in self.lineups
+            if row.concerns(team=team, match_date=match_date, opponent=opponent)
+            and (as_of is None or row.available_at(as_of))
+        ]
+        grouped: dict[tuple[dt.date, str, str, bool], list[LineupRow]] = {}
+        for row in rows:
+            grouped.setdefault(row.version, []).append(row)
+        return tuple(
+            tuple(sheet)
+            for _key, sheet in sorted(
+                grouped.items(), key=lambda item: item[1][0].version_order
+            )
         )
 
     def lineup_for(
@@ -327,15 +452,15 @@ class SupplementSet:
         opponent: str = "",
         as_of: dt.datetime | None = None,
     ) -> tuple[LineupRow, ...]:
-        """This team's sheet **for this fixture**, or nothing."""
-        rows = self.lineups
-        if as_of is not None:
-            rows = tuple(row for row in rows if row.available_at(as_of))
-        return tuple(
-            row
-            for row in rows
-            if row.concerns(team=team, match_date=match_date, opponent=opponent)
+        """The **latest** sheet available for this team and fixture, or nothing.
+
+        Returning every row ever published would merge a probable eleven with
+        the official one into a twenty-two-man team sheet.
+        """
+        versions = self.lineup_versions(
+            team, match_date=match_date, opponent=opponent, as_of=as_of
         )
+        return versions[-1] if versions else ()
 
     def xg_for(self, team: str, *, on_or_before: dt.date) -> list[tuple[float, float]]:
         """``(xG pour, xG contre)`` for a team's supplied matches, oldest first."""
@@ -482,17 +607,23 @@ def load_absences(
             player = _get(row, "player", "joueur")
             if not team or not player:
                 raise ValueError("équipe ou joueur manquant")
-            _seen((date, team, player), seen, label=f"{player} ({team}) du {date}")
+            published = _published(
+                _get(row, "publication", "published", "publie_le"), tzinfo=tzinfo
+            )
+            reason = _get(row, "reason", "motif", "raison")
+            _seen(
+                (date, team, player, published, reason),
+                seen,
+                label=f"{player} ({team}) du {date}, même déclaration",
+            )
             out.append(
                 AbsenceRow(
                     date=date,
-                    published_at=_published(
-                        _get(row, "publication", "published", "publie_le"), tzinfo=tzinfo
-                    ),
+                    published_at=published,
                     team=team,
                     player=player,
                     role=_get(row, "role", "poste"),
-                    reason=_get(row, "reason", "motif", "raison"),
+                    reason=reason,
                     replacement=_get(row, "remplacant", "remplaçant", "replacement"),
                     until=_optional_date(
                         _get(row, "jusqu_au", "jusqu_a", "until"), label="jusqu_au"
@@ -527,21 +658,27 @@ def load_lineups(
             player = _get(row, "player", "joueur")
             if not team or not player:
                 raise ValueError("équipe ou joueur manquant")
-            _seen((date, team, player), seen, label=f"{player} ({team}) du {date}")
+            published = _published(
+                _get(row, "publication", "published", "publie_le"), tzinfo=tzinfo
+            )
+            status = _status(_get(row, "statut", "status"))
+            _seen(
+                (date, team, player, published, status),
+                seen,
+                label=f"{player} ({team}) du {date}, même version",
+            )
             starting = _get(row, "titulaire", "starting", default="oui").lower()
             out.append(
                 LineupRow(
                     date=date,
-                    published_at=_published(
-                        _get(row, "publication", "published", "publie_le"), tzinfo=tzinfo
-                    ),
+                    published_at=published,
                     team=team,
                     player=player,
                     role=_get(row, "role", "poste"),
                     starting=starting not in ("non", "no", "false", "0"),
                     opponent=_get(row, "adversaire", "opponent"),
                     source=_get(row, "source", default=source),
-                    status=_status(_get(row, "statut", "status")),
+                    status=status,
                 )
             )
         except (KeyError, ValueError) as error:

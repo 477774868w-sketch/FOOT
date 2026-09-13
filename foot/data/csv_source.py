@@ -48,7 +48,12 @@ def parse_date(text: str, formats: Sequence[str] = _DATE_FORMATS) -> dt.date:
             return dt.datetime.strptime(cleaned, fmt).date()
         except ValueError:
             continue
-    raise ValueError(f"unrecognised date {text!r}; tried {list(formats)}")
+    # The message reaches the operator's own screen, in a French interface:
+    # it names an example rather than dumping strptime patterns at them.
+    raise ValueError(
+        f"date illisible : {text!r} — formats acceptés : "
+        f"13/09/2026, 13/09/26, 2026-09-13, 13.09.2026"
+    )
 
 
 def load_matches(

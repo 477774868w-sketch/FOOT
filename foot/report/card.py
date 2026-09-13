@@ -99,6 +99,13 @@ def render_card(analysis: MatchAnalysis, *, detailed: bool = True) -> str:
     rest = [f for f in dossier.findings if f.rubric == 13]
     for finding in rest:
         lines.append(f"  {finding.statement}")
+    # A declaration refused for want of a publication hour must be named here,
+    # beside the state it fails to update — otherwise the card asserts an
+    # absence the operator's own file has already lifted.
+    for finding in dossier.findings:
+        if "non encore exploitables" in finding.statement:
+            lines.append(f"  ⚠ {finding.statement}")
+            lines.append(f"    → {finding.effect}")
     if unavailable:
         # Grouped by *why*, because the three states call for three different
         # actions: wait for development, open a network route, supply a file.

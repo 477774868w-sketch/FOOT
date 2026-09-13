@@ -94,8 +94,13 @@ date,equipe,joueur,poste,motif,source,statut
 - Une ligne illisible s'affiche pour que vous la corrigiez ; elle n'est pas
   devinée.
 - Sans heure de publication, une information datée d'aujourd'hui n'est
-  considérée connue **que demain**. Pour qu'une composition du jour compte,
-  ajoutez la colonne `publication` avec l'heure : `13/09/2026 19:30`.
+  considérée connue **que demain**. Pour qu'une composition ou un retour de
+  blessure du jour compte, ajoutez la colonne `publication` avec l'heure :
+  `13/09/2026 19:30`. À défaut, la fiche vous dit quelles lignes elle a dû
+  écarter — elle ne les ignore jamais en silence.
+- Vous pouvez empiler les versions : les onze probables, puis les onze
+  officiels. La dernière connue à l'heure d'analyse fait foi, la précédente
+  reste tracée, et l'ordre des lignes n'a aucune importance.
 
 ---
 

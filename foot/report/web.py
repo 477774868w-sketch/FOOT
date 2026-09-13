@@ -24,17 +24,16 @@ import http.server
 import socketserver
 import urllib.parse
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
 
 from foot.analysis.engine import AnalysisRun, Engine
+from foot.analysis.journey import JourneyResult, run_journey
 from foot.analysis.request import DEFAULT_TIMEZONE, resolve_timezone
-from foot.collect.supplements import SupplementSet, supplements_from_text
+from foot.collect.supplements import SupplementSet
 from foot.markets.portfolio import build_ticket, plan_stakes
 from foot.report.card import render_card, render_rubric_grid
 from foot.report.table import render_summary
 
 __all__ = [
-    "FormResult",
     "analyse_form",
     "build_page",
     "render_form",
@@ -248,18 +247,6 @@ comparaison des marchés disponibles · une décision par rencontre.</p>
 </div></body></html>"""
 
 
-@dataclass(frozen=True, slots=True)
-class FormResult:
-    """One submitted form, analysed — with what was refused and what was kept."""
-
-    run: AnalysisRun
-    rejected: tuple[str, ...] = ()
-    """Pasted lines the loaders refused, each with its reason."""
-
-    used: tuple[str, ...] = field(default_factory=tuple)
-    """What the context imports actually contributed, counted."""
-
-
 def analyse_form(
     engine: Engine,
     *,
@@ -269,36 +256,22 @@ def analyse_form(
     bookmaker: str | None = None,
     pasted: Mapping[str, str] | None = None,
     supplements: SupplementSet | None = None,
-) -> FormResult:
-    """Run one submitted form through the very same engine call the CLI makes.
+) -> JourneyResult:
+    """Run one submitted form through the shared journey.
 
-    Keeping a single function for both surfaces is what makes "the browser and
-    the command line agree" a property rather than a hope: there is only one
-    code path, so there is nothing to keep in sync.
+    The browser adds nothing of its own here: :func:`foot.analysis.journey.run_journey`
+    is the single path, so the terminal and this page cannot answer the same
+    question differently.
     """
-    blocks = dict(pasted or {})
-    context = supplements or supplements_from_text(
-        xg=blocks.get("xg", ""),
-        absences=blocks.get("absences", ""),
-        lineups=blocks.get("compositions", ""),
-        tzinfo=resolve_timezone(timezone),
-    )
-    run = engine.run(
-        matches,
+    return run_journey(
+        engine,
+        matches=matches,
         as_of=as_of,
         timezone=timezone,
         bookmaker=bookmaker,
-        quoted_at=as_of,
-        supplements=context,
+        pasted=pasted,
+        supplements=supplements,
     )
-    used: list[str] = []
-    if context.xg:
-        used.append(f"{len(context.xg)} ligne(s) xG")
-    if context.absences:
-        used.append(f"{len(context.absences)} absence(s)")
-    if context.lineups:
-        used.append(f"{len(context.lineups)} ligne(s) de composition")
-    return FormResult(run=run, rejected=context.rejected, used=tuple(used))
 
 
 def _escape_block(title: str, text: str) -> str:
@@ -345,7 +318,7 @@ def render_run(run: AnalysisRun, *, budget: float | None, combine: bool) -> str:
     return "\n".join(parts)
 
 
-def render_result(result: FormResult, *, budget: float | None, combine: bool) -> str:
+def render_result(result: JourneyResult, *, budget: float | None, combine: bool) -> str:
     """The page body: what was refused, what was kept, then the analysis itself."""
     parts: list[str] = []
     if result.rejected:
@@ -358,7 +331,9 @@ def render_result(result: FormResult, *, budget: float | None, combine: bool) ->
         )
     if result.used:
         parts.append(
-            '<div class="note">Contexte réellement retenu&nbsp;: '
+            # Same wording as the terminal: the two surfaces answer the same
+            # question, so they should not phrase the answer differently.
+            '<div class="note">Contexte retenu&nbsp;: '
             + html.escape(", ".join(result.used))
             + ". Ce qui n'apparaît pas ici n'a pas servi à l'analyse.</div>"
         )

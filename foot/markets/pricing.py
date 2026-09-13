@@ -27,6 +27,7 @@ from foot.models.dixon_coles import dixon_coles_tau
 __all__ = [
     "GridDiagnostics",
     "PricedOffer",
+    "Quote",
     "expected_log_growth_at",
     "grid_diagnostics",
     "price_catalogue",
@@ -210,11 +211,25 @@ class PricedOffer:
         return "  ".join(parts)
 
 
+@dataclass(frozen=True, slots=True)
+class Quote:
+    """One price, with the instant it was observed and who quoted it.
+
+    Carrying these three together is what stops a re-run from rejuvenating a
+    stale price: an imported odd keeps the hour it was actually seen, even when
+    the analysis around it is asked for again a week later.
+    """
+
+    price: float
+    quoted_at: dt.datetime | None = None
+    bookmaker: str | None = None
+
+
 def price_catalogue(
     offers: Iterable[MarketOffer],
     matrix: ScoreMatrix,
     *,
-    quotes: Mapping[str, float] | None = None,
+    quotes: Mapping[str, float | Quote] | None = None,
     quoted_at: dt.datetime | None = None,
     as_of: dt.datetime | None = None,
     bookmaker: str | None = None,
@@ -224,17 +239,35 @@ def price_catalogue(
     Prices are matched by offer key, so a book that only quotes part of the
     catalogue simply leaves the rest unpriced — reported as such rather than
     dropped.
+
+    A quote may be a bare number — it then takes the run-wide ``quoted_at`` and
+    ``bookmaker`` — or a :class:`Quote`, which carries **its own** observation
+    time and source. Mixing the two on one fixture is the normal case: prices
+    typed in now sit beside prices imported from a file quoted yesterday, and
+    each must keep its real age.
     """
-    quotes = dict(quotes or {})
+    supplied = dict(quotes or {})
     priced: list[PricedOffer] = []
     for offer in offers:
-        quote = quotes.get(offer.key)
-        with_price = offer.with_odds(quote, bookmaker=bookmaker) if quote else offer
+        quote = supplied.get(offer.key)
+        if quote is None:
+            priced.append(
+                PricedOffer(offer=offer, profile=price_offer(offer, matrix), as_of=as_of)
+            )
+            continue
+        if isinstance(quote, Quote):
+            price, moment, book = (
+                quote.price,
+                quote.quoted_at if quote.quoted_at is not None else quoted_at,
+                quote.bookmaker if quote.bookmaker is not None else bookmaker,
+            )
+        else:
+            price, moment, book = quote, quoted_at, bookmaker
         priced.append(
             PricedOffer(
-                offer=with_price,
+                offer=offer.with_odds(price, bookmaker=book),
                 profile=price_offer(offer, matrix),
-                quoted_at=quoted_at if quote else None,
+                quoted_at=moment,
                 as_of=as_of,
             )
         )

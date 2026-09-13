@@ -18,11 +18,17 @@ an automatic re-check is never claimed, because none runs here.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 
 from foot.analysis.request import ResolvedMatch, resolve_timezone
-from foot.collect.supplements import FULL_LINEUP, AbsenceRow, SupplementSet
+from foot.collect.supplements import (
+    FULL_LINEUP,
+    AbsenceRow,
+    LineupRow,
+    SupplementSet,
+)
 from foot.domain import Fixture
 from foot.provenance import Confidence, Evidence, Source
 
@@ -232,6 +238,36 @@ def plan_lineup_checks(
     return plan
 
 
+def _observe(
+    team: str,
+    rows: Sequence[LineupRow],
+    *,
+    absences: Sequence[AbsenceRow],
+    as_of: dt.datetime,
+) -> LineupObservation:
+    """Turn one published sheet into an observation, with its own status."""
+    starters = [row for row in rows if row.starting]
+    keeper = next((row for row in starters if "gardien" in row.role.lower()), None)
+    return LineupObservation(
+        observed_at=max(
+            (row.published_at for row in rows if row.published_at is not None),
+            default=as_of,
+        ),
+        status=(
+            Confidence.CONFIRMED
+            if rows and all(r.status is Confidence.CONFIRMED for r in rows)
+            else Confidence.PROBABLE
+        ),
+        source=rows[0].source if rows else "",
+        team=team,
+        goalkeeper=keeper.player if keeper else None,
+        absences=tuple(row.player for row in absences),
+        starters=len(starters),
+        bench=len(rows) - len(starters),
+        notes=f"{len(rows)} joueur(s) importés par l'opérateur",
+    )
+
+
 def record_supplied_lineups(
     plan: LineupPlan,
     *,
@@ -262,10 +298,18 @@ def record_supplied_lineups(
     documented sporting scenario, which is where an absence is allowed to weigh.
     """
     observations: list[LineupObservation] = []
+    superseded: list[LineupObservation] = []
     decisive: list[AbsenceRow] = []
     for team, opponent in ((fixture.home, fixture.away), (fixture.away, fixture.home)):
-        rows = supplements.lineup_for(
+        # Every sheet published for this fixture, oldest first. The last one is
+        # the team's lineup; the ones before it are kept as replaced versions,
+        # so a revision can be shown rather than merely implied.
+        versions = supplements.lineup_versions(
             team, match_date=fixture.date, opponent=opponent, as_of=as_of
+        )
+        rows = versions[-1] if versions else ()
+        superseded.extend(
+            _observe(team, sheet, absences=(), as_of=as_of) for sheet in versions[:-1]
         )
         team_absences = [
             row
@@ -277,32 +321,12 @@ def record_supplied_lineups(
         decisive.extend(team_absences)
         if not rows:
             continue
-        starters = [row for row in rows if row.starting]
-        keeper = next(
-            (row for row in starters if "gardien" in row.role.lower()), None
-        )
         observations.append(
-            LineupObservation(
-                observed_at=max(
-                    (row.published_at for row in rows if row.published_at is not None),
-                    default=as_of,
-                ),
-                status=(
-                    Confidence.CONFIRMED
-                    if rows and all(r.status is Confidence.CONFIRMED for r in rows)
-                    else Confidence.PROBABLE
-                ),
-                source=rows[0].source,
-                team=team,
-                goalkeeper=keeper.player if keeper else None,
-                absences=tuple(row.player for row in team_absences),
-                starters=len(starters),
-                bench=len(rows) - len(starters),
-                notes=f"{len(rows)} joueur(s) importés par l'opérateur",
-            )
+            _observe(team, rows, absences=team_absences, as_of=as_of)
         )
     if not observations:
         return
+    plan.superseded.extend(superseded)
     if decisive:
         impact = LineupImpact.DEGRADED
         reason = (

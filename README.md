@@ -182,10 +182,10 @@ maximum likelihood from the same match log.
 
 ## Verifying it
 
-The claims above are not asserted, they are tested. **276 tests (275 passing, 1 deliberately skipped), no dependencies** — including one that reads every import in the package to prove that second claim. The 8 that touch a remote host are separated behind `-m network`, so the deterministic suite runs, and fails, with no network at all.
+The claims above are not asserted, they are tested. **292 tests (291 passing, 1 deliberately skipped), no dependencies** — including one that reads every import in the package to prove that second claim. The 8 that touch a remote host are separated behind `-m network`, so the deterministic suite runs, and fails, with no network at all.
 
 ```console
-$ pytest -q -m "not network"      # 267 passed, 1 skipped
+$ pytest -q -m "not network"      # 283 passed, 1 skipped
 $ python3 tests/run_tests.py --sans-reseau   # if you have nothing at all
 $ ruff check . && mypy .          # clean under strict settings
 ```

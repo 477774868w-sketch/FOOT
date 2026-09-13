@@ -101,6 +101,18 @@ composition **partielle**, et le contrôle n'est pas clos.
 d'une date confirmée. Sans l'un ni l'autre, elle vaut 21 jours — chiffre déclaré
 comme hypothèse, pas mesuré.
 
+**L'état d'un joueur se résout chronologiquement.** Vous pouvez empiler les
+déclarations dans l'ordre où elles arrivent — blessure, retour, rechute : la
+dernière connue à l'heure d'analyse décide. Une ligne dont le motif est
+`retour` (ou qui porte une date en colonne `retour`) rend le joueur disponible ;
+une blessure postérieure le retire de nouveau.
+
+**Donnez l'heure de publication pour les nouvelles du jour.** Sans elle, une
+déclaration datée d'aujourd'hui n'est réputée connue que demain — y compris un
+retour. La fiche signale alors, en toutes lettres, les déclarations qu'elle a dû
+écarter et ce qu'il faut faire pour qu'elles comptent ; elle n'affirme jamais en
+silence une absence que votre propre fichier a levée.
+
 **Une ligne illisible est rejetée avec son motif**, jamais devinée : valeur non
 finie, xG négatif, date illisible, doublon. Le motif remonte jusqu'à l'interface
 pour que vous puissiez corriger.
@@ -132,7 +144,7 @@ Serie A 2026-27) :
 |---|---|
 | `--xg-csv` | R07 renseignée **partiellement** : la rubrique réunit buts, xG, npxG, xGA, tirs, grosses occasions et qualité des tirs — la fiche nomme ce qui est couvert et ce qui manque. L'écart buts/xG est estimé par un postérieur Gamma-Poisson : il ne produit un scénario que si son intervalle de crédibilité exclut « aucun écart », donc pas sur un match isolé |
 | `--absences-csv` | R11 renseignée ; une absence à un poste suivi crée un scénario sportif documenté. Le barème agit **par poste et sur le bon canal** : un gardien absent fait monter l'attaque adverse, un buteur fait baisser la sienne ; un remplaçant nommé atténue l'effet de moitié. Ces amplitudes sont des **hypothèses déclarées**, non calibrées |
-| `--compositions-csv` | R10 et R21 renseignées ; le contrôle T−75/T−60 porte sur la feuille fournie et rend un **verdict de réévaluation motivé**. Une feuille plus récente remplace la précédente, qui reste visible |
+| `--compositions-csv` | R10 et R21 renseignées ; le contrôle T−75/T−60 porte sur la feuille fournie et rend un **verdict de réévaluation motivé**. Une feuille plus récente **remplace** la précédente, qui reste visible : publiez les onze joueurs probables puis les onze officiels dans le même fichier, la dernière version disponible fait foi et l'ordre des lignes est sans effet |
 
 Les lignes xG doivent désigner des matchs présents dans l'historique chargé
 (mêmes noms d'équipes, mêmes dates). Sinon la fiche le dit explicitement —
@@ -373,7 +385,7 @@ les fenêtres de test s'y chevauchaient aux dates frontières.
 ## 7. Vérifier
 
 ```console
-$ pytest -m "not network"        # 267 réussis, 1 ignoré, 8 déselectionnés
+$ pytest -m "not network"        # 283 réussis, 1 ignoré, 8 déselectionnés
 $ python3 tests/run_tests.py --sans-reseau   # les mêmes, sans rien installer
 $ ruff check . && mypy .         # propres sur 82 fichiers
 ```
@@ -381,7 +393,7 @@ $ ruff check . && mypy .         # propres sur 82 fichiers
 Le lanceur sans dépendance compte **séparément** réussites, échecs et ignorés :
 
 ```
-267 réussi(s), 0 échec(s), 1 ignoré(s) sur 268 en 30.9s
+283 réussi(s), 0 échec(s), 1 ignoré(s) sur 284 en 30.95s
 ```
 
 Un test qui ne peut pas s'exécuter lève `unittest.SkipTest` et apparaît comme

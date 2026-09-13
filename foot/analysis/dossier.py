@@ -400,6 +400,17 @@ class ExposureAudit:
         return "cotes consultées après scellement : séparation respectée"
 
 
+def _concerns(item: Evidence, fixture: Fixture) -> bool:
+    """Whether a dated fact is about this fixture at all.
+
+    Dataset evidence carries no team name and is always kept; a supplied fact
+    that names neither club belongs to another match.
+    """
+    if not item.key.startswith(("xg::", "absence::", "composition::")):
+        return True
+    return fixture.home in item.key or fixture.away in item.key
+
+
 def build_sport_input(
     fixture: Fixture,
     history: MatchLog,
@@ -422,13 +433,23 @@ def build_sport_input(
         for m in history
         if result_available_at(m.date, tzinfo=tzinfo, delay=result_delay) <= as_of
     )
+    # The ledger must be cut by the very same rule as the data. Deriving the
+    # context's evidence from the *already cut* set — rather than filtering it
+    # separately on a date — is what stops a report from citing a source for an
+    # absence its own dossier refused as not yet published.
+    context = (supplements or SupplementSet()).available_at(as_of)
+    entries = [
+        item
+        for item in (*evidence, *context.evidence())
+        if item.fact_date is None or _concerns(item, fixture)
+    ]
     return SportInput(
         fixture=fixture,
         history=known,
         as_of=as_of,
-        evidence=tuple(evidence),
+        evidence=tuple(entries),
         competition=competition,
-        supplements=(supplements or SupplementSet()).available_at(as_of),
+        supplements=context,
         knowledge_cutoff=as_of,
         cutoff_rule=(
             f"date de disponibilité = date du match + {result_delay.days} j "

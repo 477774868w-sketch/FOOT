@@ -59,11 +59,17 @@ from foot.analysis.xg import XgBalance
 from foot.collect.base import Capability, OddsSource, SeasonData, SeasonSource
 from foot.collect.openfootball import COMPETITIONS, resolve_competition
 from foot.collect.registry import Registry, RegistryReport
-from foot.collect.supplements import FULL_LINEUP, SupplementSet
+from foot.collect.supplements import FULL_LINEUP, AbsenceRow, SupplementSet
 from foot.data.synthetic import SYNTHETIC_MARKER
 from foot.domain import Fixture, Match, MatchLog, Outcome
 from foot.markets.catalogue import standard_catalogue
-from foot.markets.pricing import GridDiagnostics, PricedOffer, grid_diagnostics, price_catalogue
+from foot.markets.pricing import (
+    GridDiagnostics,
+    PricedOffer,
+    Quote,
+    grid_diagnostics,
+    price_catalogue,
+)
 from foot.markets.selection import (
     Decision,
     RankingCriteria,
@@ -644,13 +650,10 @@ class Engine:
         # The dataset evidence collected during loading travels with the input,
         # so the sealed dossier can cite the sources its findings refer to.
         extra = supplements or SupplementSet()
+        # Only the dataset evidence is passed in: `build_sport_input` derives
+        # the context's own evidence from the set it has just cut, so the ledger
+        # and the dossier can never disagree about what was knowable.
         evidence = list(self._evidence.get(resolved.competition_key, ()))
-        evidence.extend(
-            item
-            for item in extra.evidence()
-            if _mentions(item, fixture) and item.fact_date is not None
-            and item.fact_date <= as_of.date()
-        )
         # One input, cut once. Everything downstream — estimate, findings,
         # scenarios, lineup check, decision — reads `sport_input`, never the
         # raw history or the raw supplements, so none of them can see further
@@ -673,32 +676,56 @@ class Engine:
         record_supplied_lineups(
             plan, fixture=fixture, supplements=known_extra, as_of=as_of
         )
-        dossier = self._build_dossier(sport_input, ledger, known_extra, resolved, plan)
+        # Declarations the operator supplied that are not yet demonstrably
+        # public. They cannot be used, but they must be said: see
+        # `SupplementSet.pending_absence_updates`.
+        pending = tuple(
+            row
+            for team in (fixture.home, fixture.away)
+            for row in extra.pending_absence_updates(
+                team, on_or_before=fixture.date, as_of=as_of
+            )
+        )
+        dossier = self._build_dossier(
+            sport_input, ledger, known_extra, resolved, plan, pending
+        )
         sealed = dossier.seal()
         audit.sealed(sealed.sealed_at)
 
         # ---- Market phase: prices become visible only now ----------------
         matrix = sealed.score_matrix
         scenarios = self._scenarios(dossier, known_history, known_extra)
-        prices: dict[str, float] = dict(quotes or {})
+        # Every price carries its own observation time and its own source. A
+        # single run-wide `quoted_at` let a re-run rejuvenate an imported odd:
+        # the price was quoted 48 h ago, the analysis was asked for now, and the
+        # staleness check saw a fresh price. Age belongs to the price, not to
+        # the run.
+        prices: dict[str, Quote] = {
+            key: Quote(price=value, quoted_at=quoted_at, bookmaker=bookmaker)
+            for key, value in (quotes or {}).items()
+        }
         if odds is not None:
             for outcome, price in zip(Outcome, odds, strict=True):
-                prices.setdefault(f"1X2:{outcome.value}", price)
+                prices.setdefault(
+                    f"1X2:{outcome.value}",
+                    Quote(price=price, quoted_at=quoted_at, bookmaker=bookmaker),
+                )
         # Prices a provider can quote are collected **here**, after the seal,
         # never during loading: an imported odds file that never reaches the
         # selector is an option that exists only in the help text.
         imported, imported_at, imported_book = self._provider_prices(fixture)
         for key, price in imported.items():
-            prices.setdefault(key, price)
-        if imported_book:
-            bookmaker = bookmaker or imported_book
-        if imported and quoted_at is None:
-            quoted_at = imported_at
+            prices.setdefault(
+                key,
+                Quote(
+                    price=price,
+                    quoted_at=imported_at,
+                    bookmaker=imported_book or bookmaker,
+                ),
+            )
         if prices:
             audit.saw_odds(f"{len(prices)} cote(s) fournies par l'opérateur")
-            ledger.extend(
-                self._odds_evidence(fixture, prices, bookmaker, quoted_at or as_of)
-            )
+            ledger.extend(self._odds_evidence(fixture, prices, as_of))
 
         # A quoted line the standard catalogue does not carry is built on
         # demand, so an operator's Asian -0.75 is compared rather than dropped.
@@ -715,6 +742,7 @@ class Engine:
             catalogue, matrix, quotes=prices, quoted_at=quoted_at, as_of=as_of,
             bookmaker=bookmaker,
         )
+        # `prices` is keyed by market; the market findings only need the keys.
         market_findings = _market_findings(priced, prices, scenarios)
         assessments = self._assess_rubrics(
             report,
@@ -799,6 +827,7 @@ class Engine:
         supplements: SupplementSet | None = None,
         resolved: ResolvedMatch | None = None,
         plan: LineupPlan | None = None,
+        pending: Sequence[AbsenceRow] = (),
     ) -> SportDossier:
         fixture = sport_input.fixture
         history = sport_input.history
@@ -822,7 +851,9 @@ class Engine:
         )
         findings = self._findings(fixture, history, model, elo, evidence_keys)
         findings.extend(
-            _supplement_findings(fixture, history, supplements or SupplementSet(), plan)
+            _supplement_findings(
+                fixture, history, supplements or SupplementSet(), plan, pending
+            )
         )
         if resolved is not None:
             findings.insert(0, self._identification_finding(fixture, resolved))
@@ -1182,24 +1213,40 @@ class Engine:
     @staticmethod
     def _odds_evidence(
         fixture: Fixture,
-        prices: Mapping[str, float],
-        bookmaker: str | None,
-        quoted_at: dt.datetime,
+        prices: Mapping[str, Quote],
+        as_of: dt.datetime,
     ) -> list[Evidence]:
-        """One entry per quoted market, so each price keeps its own timestamp."""
-        source = Source(name=bookmaker or "cotes opérateur", provider="opérateur")
-        return [
-            Evidence(
-                key=f"cote::{key}::{fixture.home} vs {fixture.away}",
-                value=f"{odds:.2f}",
-                source=source,
-                retrieved_at=quoted_at,
-                status=Confidence.PROBABLE,
-                fact_date=fixture.date,
-                note=f"prix fourni par l'opérateur pour {key} ; non recoupé",
+        """One entry per quoted market, each with **its own** time and source.
+
+        A single timestamp for the whole run would date an odd imported two days
+        ago to the moment the operator pressed the button.
+        """
+        entries: list[Evidence] = []
+        for key, quote in sorted(prices.items()):
+            moment = quote.quoted_at or as_of
+            age = as_of - moment
+            hours = age.total_seconds() / 3600.0
+            entries.append(
+                Evidence(
+                    key=f"cote::{key}::{fixture.home} vs {fixture.away}",
+                    value=f"{quote.price:.2f}",
+                    source=Source(
+                        name=quote.bookmaker or "cotes opérateur",
+                        provider="opérateur",
+                    ),
+                    retrieved_at=moment,
+                    status=Confidence.PROBABLE,
+                    fact_date=fixture.date,
+                    note=(
+                        f"prix fourni pour {key} ; relevé il y a {hours:.1f} h "
+                        f"({moment.strftime('%Y-%m-%d %H:%M %Z')}) ; non recoupé"
+                        if quote.quoted_at is not None
+                        else f"prix fourni pour {key} ; heure de relevé non "
+                        f"déclarée : l'ancienneté ne peut pas être vérifiée"
+                    ),
+                )
             )
-            for key, odds in sorted(prices.items())
-        ]
+        return entries
 
 
 def _mentions(item: Evidence, fixture: Fixture) -> bool:
@@ -1304,6 +1351,7 @@ def _supplement_findings(
     history: MatchLog,
     supplements: SupplementSet,
     plan: LineupPlan | None = None,
+    pending: Sequence[AbsenceRow] = (),
 ) -> list[Finding]:
     """Turn operator-supplied context into traceable findings.
 
@@ -1388,6 +1436,29 @@ def _supplement_findings(
                     effect="alimente le contrôle T−75/T−60 et la réévaluation du dossier",
                 )
             )
+    if pending:
+        findings.append(
+            Finding(
+                rubric=11,
+                kind=FindingKind.FACT,
+                statement=(
+                    "déclaration(s) plus récente(s) non encore exploitables : "
+                    + ", ".join(
+                        f"{row.player} — {row.reason or 'motif non précisé'} "
+                        f"du {row.date.isoformat()}"
+                        for row in pending
+                    )
+                ),
+                model_variable=None,
+                effect=(
+                    "affiché seulement : sans horodatage de publication, "
+                    "l'antériorité de ces lignes n'est pas démontrable à l'heure "
+                    "d'analyse, donc elles ne sont pas utilisées. L'état retenu "
+                    "peut être périmé ; ajoutez l'heure de publication, ou "
+                    "relancez après minuit, pour qu'elles comptent."
+                ),
+            )
+        )
     if plan is not None and plan.observations:
         findings.append(
             Finding(
@@ -1416,7 +1487,7 @@ def _supplement_findings(
 
 def _market_findings(
     priced: Sequence[PricedOffer],
-    prices: Mapping[str, float],
+    prices: Mapping[str, Quote],
     scenarios: Sequence[Scenario],
 ) -> list[Finding]:
     """Findings produced by the market phase, so the grid reflects it too.
