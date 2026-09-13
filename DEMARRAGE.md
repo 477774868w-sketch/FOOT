@@ -177,3 +177,5 @@ $ python3 tests/run_tests.py       # la suite complète, sans rien installer
 | `hors prématch` | le coup d'envoi est passé — l'analyse d'avant-match ne s'applique plus |
 | `aucune cote fournie` | l'angle sportif est donné, avec la cote à partir de laquelle le pari deviendrait intéressant |
 | `n ligne(s) importées, aucune exploitable` | les noms d'équipes ou les dates du fichier ne correspondent pas à l'historique chargé |
+| `ancienneté inconnue` | la cote importée n'a pas d'heure de relevé : confirmez-la avant de jouer ce prix |
+| `postérieure à l'heure d'analyse` | l'information a été publiée après l'heure que vous avez saisie — elle n'existait pas encore ; avancez la date d'analyse si elle est connue maintenant |

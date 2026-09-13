@@ -23,7 +23,6 @@ from foot.collect.registry import Registry
 from foot.collect.supplements import supplements_from_text
 from foot.domain import Fixture
 from foot.market.odds import MatchOdds
-from foot.report.card import render_card
 from foot.report.web import analyse_form, render_result
 
 PARIS = ZoneInfo("Europe/Paris")
@@ -345,7 +344,7 @@ def test_e4a_the_cli_reads_publication_times_in_the_chosen_timezone() -> None:
 
     # …but it must be named as refused, not dropped in silence.
     output = buffer.getvalue()
-    assert "non encore exploitables" in output or "Martin" not in output, output[-500:]
+    assert "Martin" not in output or "postérieure" in output, output[-500:]
 
 
 def test_e4b_cli_and_form_agree_outside_europe_paris() -> None:
@@ -447,13 +446,15 @@ def test_e3e_a_pending_declaration_is_named_rather_than_ignored() -> None:
     )
     analysis = run.analyses[0]
     assert analysis.sealed is not None
-    statements = " ".join(f.statement for f in analysis.sealed.dossier.findings)
-    assert "non encore exploitables" in statements, statements
-    assert "Martin" in statements
+    # The warning belongs to the **import report**, not to the sealed dossier:
+    # a historical dossier cannot depend on a line that did not exist at its
+    # own date (see `test_f2a`). What matters here is that it is said at all.
+    notes = " ".join(analysis.import_notes)
+    assert "Martin" in notes, notes
+    assert "sans heure de publication" in notes, notes
 
-    card = render_card(analysis)
-    assert "non encore exploitables" in card
-    assert "horodatage de publication" in card
+    statements = " ".join(f.statement for f in analysis.sealed.dossier.findings)
+    assert "Martin" not in statements or "absence(s) signalée" in statements
 
 
 def test_e3f_a_timestamped_return_needs_no_warning() -> None:
@@ -471,8 +472,7 @@ def test_e3f_a_timestamped_return_needs_no_warning() -> None:
     )
     analysis = run.analyses[0]
     assert analysis.sealed is not None
-    statements = " ".join(f.statement for f in analysis.sealed.dossier.findings)
-    assert "non encore exploitables" not in statements, statements
+    assert not analysis.import_notes, analysis.import_notes
 
 
 def test_e4d_both_surfaces_word_the_context_summary_identically() -> None:

@@ -47,7 +47,19 @@ class JourneyResult:
     """Lines the loaders refused, each with its reason."""
 
     used: tuple[str, ...] = ()
-    """What the context imports actually contributed, counted."""
+    """What the context imports actually **fed the analysis**, counted.
+
+    Counts the lines the engine could use at ``as_of``, not the lines read from
+    the file: reporting "2 absences" when one of them was published after the
+    analysis overstates what the recommendation rests on.
+    """
+
+    notes: tuple[str, ...] = ()
+    """Lines read but not usable for this analysis, each with its cause.
+
+    These live here rather than in the sealed dossier: they describe the import,
+    not the match.
+    """
 
     supplements: SupplementSet = field(default_factory=SupplementSet)
     """The context as loaded — before the engine's availability cut."""
@@ -61,6 +73,12 @@ class JourneyResult:
                 + ", ".join(self.used)
                 + ". Ce qui n'apparaît pas ici n'a pas servi à l'analyse."
             )
+        if self.notes:
+            lines.append(
+                f"Lignes lues mais écartées de cette analyse ({len(self.notes)}) — "
+                f"le dossier sportif n'en dépend pas :"
+            )
+            lines.extend(f"  ⚠ {note}" for note in self.notes)
         if self.rejected:
             lines.append(
                 f"Lignes non retenues ({len(self.rejected)}) — corrigez-les et "
@@ -133,16 +151,26 @@ def run_journey(
         quoted_at=quoted_at if quoted_at is not None else as_of,
         supplements=context,
     )
+    # Count what the engine could actually see at `as_of`, not what the file
+    # contained: a line published after the analysis is read, reported, and not
+    # used — saying otherwise inflates what the recommendation rests on.
+    usable = context.available_at(as_of)
     used: list[str] = []
-    if context.xg:
-        used.append(f"{len(context.xg)} ligne(s) xG")
-    if context.absences:
-        used.append(f"{len(context.absences)} absence(s)")
-    if context.lineups:
-        used.append(f"{len(context.lineups)} ligne(s) de composition")
+    if usable.xg:
+        used.append(f"{len(usable.xg)} ligne(s) xG")
+    if usable.absences:
+        used.append(f"{len(usable.absences)} absence(s)")
+    if usable.lineups:
+        used.append(f"{len(usable.lineups)} ligne(s) de composition")
+    notes = tuple(
+        dict.fromkeys(
+            note for analysis in run.analyses for note in analysis.import_notes
+        )
+    )
     return JourneyResult(
         run=run,
         rejected=context.rejected,
         used=tuple(used),
+        notes=notes,
         supplements=context,
     )

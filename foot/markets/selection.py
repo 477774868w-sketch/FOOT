@@ -403,6 +403,15 @@ def select_best(
         rejection = ""
         if item.offer.family in criteria.exclude_families:
             rejection = "famille exclue par les critères"
+        elif not item.age_known:
+            # An age nobody recorded cannot be checked, so it cannot be trusted
+            # either: the market stays on the card with its angle, but it cannot
+            # carry a recommendation until the operator confirms when the price
+            # was seen.
+            rejection = (
+                "ancienneté inconnue : aucune heure de relevé fournie — "
+                "confirmez l'heure de relevé avant de jouer ce prix"
+            )
         elif item.is_stale(limit_hours=criteria.max_stale_hours):
             age = item.price_age
             hours = age.total_seconds() / 3600.0 if age else 0.0

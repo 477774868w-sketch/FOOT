@@ -511,3 +511,77 @@ python3 tests/run_tests.py --sans-reseau
 ruff check .                 propre
 mypy .                       propre, 84 fichiers
 ```
+
+---
+
+## 10. Quatrième revue indépendante du commit `627f447` — corrections
+
+Deux problèmes temporels. Les **12 tests** de `tests/test_regression_review4.py`
+échouaient tous sur `627f447` et passent par les entrées réelles — formulaire et
+ligne de commande.
+
+### 10.1 Défauts reproduits, puis corrigés
+
+| # | Reproduit sur `627f447` | Correction | Test |
+|---|---|---|---|
+| 1a | Cote importée **sans heure de relevé** : le prix recevait l'heure de l'analyse, son âge devenait zéro, la décision « recommandé » | Dans `price_catalogue`, une `Quote` dont `quoted_at` vaut `None` ne reprend plus l'horodatage global : elle garde un **âge inconnu**. Le sélecteur écarte alors ce prix avec « ancienneté inconnue — confirmez l'heure de relevé avant de jouer ce prix » | `test_f1a/b` |
+| 1b | Cote relevée **24 h après** `as_of` : âge −24 h, `is_stale()` renvoyait `False`, décision « recommandé ». Le contrôle portait sur les prix trop vieux, pas sur ceux venus du futur | Un prix postérieur à l'instant d'analyse n'existait pas à cet instant : il est **exclu de cette analyse** dès le calcul, avec son motif porté par `PricedOffer.exclusion`. Les autres marchés valides sont conservés et comparés | `test_f1c–f` |
+| 2 | Une déclaration publiée après `as_of` était réintroduite dans les **constats du dossier scellé** avec le type `FACT` : l'empreinte changeait (`77bd5949…` → `239d908a…`). Le résumé annonçait « 2 absences » en comptant les lignes lues | Les avertissements d'import quittent le dossier scellé pour le **compte rendu d'import** (`MatchAnalysis.import_notes`, agrégé par `JourneyResult.notes`). Le décompte porte sur ce que le moteur pouvait voir à `as_of`, pas sur ce que le fichier contenait | `test_f2a–c/e/f` |
+| 2b | Le message réclamait « ajoutez l'heure de publication » **alors qu'elle existait** — il envoyait corriger un fichier correct | `AbsenceRow.unavailable_because()` : deux causes, deux messages. Une publication postérieure à l'analyse n'est pas une publication sans heure, et une seule des deux est du ressort de l'opérateur | `test_f2d` |
+
+### 10.2 Une distinction que la correction a rendue nécessaire
+
+Refuser de dater un prix sans heure a d'abord fait tomber une cote **saisie sur
+la ligne de match**, que rien n'horodatait explicitement. La règle juste tient en
+une phrase :
+
+- une cote **tapée par l'opérateur** est donnée maintenant : sans heure
+  explicite, elle est datée de l'instant d'analyse, qui est le moment où il l'a
+  lue ;
+- une cote **importée** garde l'heure que sa source déclare ; si la source n'en
+  déclare aucune, son âge est réellement inconnu, et l'inventer fabriquerait une
+  fraîcheur qu'elle n'a jamais eue.
+
+De même, la vérification d'ancienneté n'existe que pour une analyse **datée** :
+sans `as_of`, il n'y a pas de contrôle de fraîcheur à échouer.
+
+### 10.3 Avant / après
+
+```
+1. cote importée sans heure de relevé
+   avant   quoted_at = heure d'analyse · âge 0 h · recommandé
+   après   quoted_at = None            · âge inconnu · aucun pari
+           motif : « ancienneté inconnue : aucune heure de relevé fournie —
+                     confirmez l'heure de relevé avant de jouer ce prix »
+
+2. cote relevée 24 h APRÈS l'analyse
+   avant   âge −24 h · is_stale() False · recommandé
+   après   prix exclu · « cote relevée le 2026-09-14 12:00 CEST, postérieure à
+           l'heure d'analyse : exclue de cette analyse » · sous condition de prix
+
+3. retour publié à 18 h, analyse à 12 h
+   avant   empreinte 77bd5949c3e06b24 → 239d908a59a5223c · 10 findings · « 2 absences »
+   après   empreinte 77bd5949c3e06b24 → 77bd5949c3e06b24 ·  9 findings · « 1 absence »
+           compte rendu d'import : « publication du 2026-09-13 18:00 CEST
+           postérieure à l'heure d'analyse (2026-09-13 12:00 CEST) : hors de ce dossier »
+
+4. deux causes, deux messages
+   publication future  → « postérieure à l'heure d'analyse : hors de ce dossier »
+   publication absente → « sans heure de publication : l'antériorité dans la
+                           journée n'est pas démontrable »
+```
+
+Terminal et navigateur produisent des **notes et un décompte identiques**,
+vérifié sur le parcours réel ; le serveur affiche l'exclusion dans un encart
+« Lignes lues mais écartées de cette analyse ».
+
+### 10.4 Vérifications
+
+```
+pytest -m "not network"      295 réussis, 1 ignoré, 8 déselectionnés
+pytest -m "network"          8 réussis
+python3 tests/run_tests.py --sans-reseau
+                             295 réussi(s), 0 échec(s), 1 ignoré(s) sur 296
+ruff check .                 propre
+mypy .                       propre, 85 fichiers
+```

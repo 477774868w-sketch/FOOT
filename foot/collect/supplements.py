@@ -42,7 +42,7 @@ import csv
 import datetime as dt
 import math
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -131,6 +131,29 @@ class _Timed:
             f"aucun horodatage de publication : antériorité non démontrable dans la "
             f"journée du {self.date.isoformat()}, information réputée disponible le "
             f"lendemain à 00:00"
+        )
+
+    def unavailable_because(self, as_of: dt.datetime) -> str:
+        """Why this line cannot be used at ``as_of`` — two causes, two messages.
+
+        Telling an operator to add a publication hour they already supplied
+        sends them to fix a correct file. A line published *after* the analysis
+        is a different problem from a line published at an unknown hour, and
+        only one of them is theirs to correct.
+        """
+        if self.available_at(as_of):
+            return ""
+        if self.published_at is not None:
+            return (
+                f"publication du "
+                f"{self.published_at.strftime('%Y-%m-%d %H:%M %Z')} postérieure "
+                f"à l'heure d'analyse "
+                f"({as_of.strftime('%Y-%m-%d %H:%M %Z')}) : hors de ce dossier"
+            )
+        return (
+            f"sans heure de publication : l'antériorité dans la journée du "
+            f"{self.date.isoformat()} n'est pas démontrable, la ligne ne sera "
+            f"connue qu'au lendemain 00:00"
         )
 
 
@@ -414,6 +437,31 @@ class SupplementSet:
                 continue
             pending[row.player] = row
         return tuple(pending.values())
+
+    def import_notes(
+        self,
+        *,
+        teams: Sequence[str],
+        on_or_before: dt.date,
+        as_of: dt.datetime,
+    ) -> tuple[str, ...]:
+        """Lines the operator supplied that this analysis could not use.
+
+        These belong to the **import report**, never to the sealed dossier: a
+        historical dossier cannot depend on information that did not exist at
+        its own date, and adding a note about it changed the fingerprint.
+        """
+        notes: list[str] = []
+        for team in teams:
+            for row in self.pending_absence_updates(
+                team, on_or_before=on_or_before, as_of=as_of
+            ):
+                notes.append(
+                    f"{row.team} — {row.player} "
+                    f"({row.reason or 'motif non précisé'}, "
+                    f"{row.date.isoformat()}) : {row.unavailable_because(as_of)}"
+                )
+        return tuple(notes)
 
     def lineup_versions(
         self,

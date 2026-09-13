@@ -66,6 +66,20 @@ Les corners, cartons et buteurs ne se déduisent pas de la loi des scores finaux
 Une cote donnée pour l'un d'eux (`CORNERS:+9.5=1.90`) n'est **ni estimée ni
 ignorée** : la fiche la nomme et dit qu'un modèle dédié serait requis.
 
+**L'âge d'un prix compte.** Une cote que vous tapez est datée de l'heure
+d'analyse — c'est le moment où vous l'avez lue. Une cote **importée** garde
+l'heure déclarée par sa source :
+
+| Situation | Ce qui se passe |
+|---|---|
+| relevée il y a moins de 12 h | comparée normalement |
+| relevée il y a plus de 12 h | écartée : « cote périmée » |
+| **heure de relevé inconnue** | écartée : « ancienneté inconnue » — confirmez l'heure avant de jouer ce prix |
+| **relevée après l'heure d'analyse** | exclue de cette analyse : elle n'existait pas encore |
+
+Dans tous ces cas, les autres marchés correctement cotés restent comparés, et la
+fiche nomme chaque exclusion avec son motif.
+
 ### Fournir le contexte que personne ne publie ici
 
 Aucune source accessible ne sert les xG, les absences ou les compositions. Vous
@@ -385,7 +399,7 @@ les fenêtres de test s'y chevauchaient aux dates frontières.
 ## 7. Vérifier
 
 ```console
-$ pytest -m "not network"        # 283 réussis, 1 ignoré, 8 déselectionnés
+$ pytest -m "not network"        # 295 réussis, 1 ignoré, 8 déselectionnés
 $ python3 tests/run_tests.py --sans-reseau   # les mêmes, sans rien installer
 $ ruff check . && mypy .         # propres sur 82 fichiers
 ```
@@ -393,7 +407,7 @@ $ ruff check . && mypy .         # propres sur 82 fichiers
 Le lanceur sans dépendance compte **séparément** réussites, échecs et ignorés :
 
 ```
-283 réussi(s), 0 échec(s), 1 ignoré(s) sur 284 en 30.95s
+295 réussi(s), 0 échec(s), 1 ignoré(s) sur 296 en 32.45s
 ```
 
 Un test qui ne peut pas s'exécuter lève `unittest.SkipTest` et apparaît comme

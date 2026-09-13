@@ -59,7 +59,7 @@ from foot.analysis.xg import XgBalance
 from foot.collect.base import Capability, OddsSource, SeasonData, SeasonSource
 from foot.collect.openfootball import COMPETITIONS, resolve_competition
 from foot.collect.registry import Registry, RegistryReport
-from foot.collect.supplements import FULL_LINEUP, AbsenceRow, SupplementSet
+from foot.collect.supplements import FULL_LINEUP, SupplementSet
 from foot.data.synthetic import SYNTHETIC_MARKER
 from foot.domain import Fixture, Match, MatchLog, Outcome
 from foot.markets.catalogue import standard_catalogue
@@ -146,6 +146,14 @@ class MatchAnalysis:
     lineup_plan: LineupPlan | None = None
     ledger: Ledger = field(default_factory=Ledger)
     scenarios: tuple[Scenario, ...] = ()
+    import_notes: tuple[str, ...] = ()
+    """Supplied lines this analysis could not use, and why.
+
+    Deliberately outside :attr:`sealed`: these are facts about the *import*, not
+    about the match, and folding them into the dossier made its fingerprint
+    depend on information that did not exist at the dossier's own date.
+    """
+
     blocked_reason: str = ""
 
     @property
@@ -676,19 +684,16 @@ class Engine:
         record_supplied_lineups(
             plan, fixture=fixture, supplements=known_extra, as_of=as_of
         )
-        # Declarations the operator supplied that are not yet demonstrably
-        # public. They cannot be used, but they must be said: see
-        # `SupplementSet.pending_absence_updates`.
-        pending = tuple(
-            row
-            for team in (fixture.home, fixture.away)
-            for row in extra.pending_absence_updates(
-                team, on_or_before=fixture.date, as_of=as_of
-            )
+        # Lines the operator supplied that this analysis cannot use. They are
+        # part of the **import report**, never of the sealed dossier: a
+        # historical dossier cannot depend on information that did not exist at
+        # its own date, and a note about it changed the fingerprint.
+        import_notes = extra.import_notes(
+            teams=(fixture.home, fixture.away),
+            on_or_before=fixture.date,
+            as_of=as_of,
         )
-        dossier = self._build_dossier(
-            sport_input, ledger, known_extra, resolved, plan, pending
-        )
+        dossier = self._build_dossier(sport_input, ledger, known_extra, resolved, plan)
         sealed = dossier.seal()
         audit.sealed(sealed.sealed_at)
 
@@ -700,15 +705,21 @@ class Engine:
         # the price was quoted 48 h ago, the analysis was asked for now, and the
         # staleness check saw a fresh price. Age belongs to the price, not to
         # the run.
+        # A price **typed on the match line** is being given now: absent an
+        # explicit hour it is dated at the analysis instant, which is when the
+        # operator read it. A price an **importer** supplies is different — if
+        # its source declares no hour, its age is genuinely unknown, and
+        # inventing one would manufacture a freshness it never had.
+        typed_at = quoted_at if quoted_at is not None else as_of
         prices: dict[str, Quote] = {
-            key: Quote(price=value, quoted_at=quoted_at, bookmaker=bookmaker)
+            key: Quote(price=value, quoted_at=typed_at, bookmaker=bookmaker)
             for key, value in (quotes or {}).items()
         }
         if odds is not None:
             for outcome, price in zip(Outcome, odds, strict=True):
                 prices.setdefault(
                     f"1X2:{outcome.value}",
-                    Quote(price=price, quoted_at=quoted_at, bookmaker=bookmaker),
+                    Quote(price=price, quoted_at=typed_at, bookmaker=bookmaker),
                 )
         # Prices a provider can quote are collected **here**, after the seal,
         # never during loading: an imported odds file that never reaches the
@@ -765,6 +776,7 @@ class Engine:
             resolved=resolved,
             sealed=sealed,
             decision=decision,
+            import_notes=import_notes,
             priced=tuple(priced),
             rubrics=tuple(assessments),
             diagnostics=grid_diagnostics(
@@ -827,7 +839,6 @@ class Engine:
         supplements: SupplementSet | None = None,
         resolved: ResolvedMatch | None = None,
         plan: LineupPlan | None = None,
-        pending: Sequence[AbsenceRow] = (),
     ) -> SportDossier:
         fixture = sport_input.fixture
         history = sport_input.history
@@ -851,9 +862,7 @@ class Engine:
         )
         findings = self._findings(fixture, history, model, elo, evidence_keys)
         findings.extend(
-            _supplement_findings(
-                fixture, history, supplements or SupplementSet(), plan, pending
-            )
+            _supplement_findings(fixture, history, supplements or SupplementSet(), plan)
         )
         if resolved is not None:
             findings.insert(0, self._identification_finding(fixture, resolved))
@@ -1351,7 +1360,6 @@ def _supplement_findings(
     history: MatchLog,
     supplements: SupplementSet,
     plan: LineupPlan | None = None,
-    pending: Sequence[AbsenceRow] = (),
 ) -> list[Finding]:
     """Turn operator-supplied context into traceable findings.
 
@@ -1436,29 +1444,6 @@ def _supplement_findings(
                     effect="alimente le contrôle T−75/T−60 et la réévaluation du dossier",
                 )
             )
-    if pending:
-        findings.append(
-            Finding(
-                rubric=11,
-                kind=FindingKind.FACT,
-                statement=(
-                    "déclaration(s) plus récente(s) non encore exploitables : "
-                    + ", ".join(
-                        f"{row.player} — {row.reason or 'motif non précisé'} "
-                        f"du {row.date.isoformat()}"
-                        for row in pending
-                    )
-                ),
-                model_variable=None,
-                effect=(
-                    "affiché seulement : sans horodatage de publication, "
-                    "l'antériorité de ces lignes n'est pas démontrable à l'heure "
-                    "d'analyse, donc elles ne sont pas utilisées. L'état retenu "
-                    "peut être périmé ; ajoutez l'heure de publication, ou "
-                    "relancez après minuit, pour qu'elles comptent."
-                ),
-            )
-        )
     if plan is not None and plan.observations:
         findings.append(
             Finding(

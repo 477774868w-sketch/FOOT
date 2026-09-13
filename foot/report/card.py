@@ -180,6 +180,12 @@ def render_card(analysis: MatchAnalysis, *, detailed: bool = True) -> str:
                 )
         else:
             lines.append("  aucun marché coté : aucune comparaison de prix possible")
+        # A price the engine refused is named with its reason. Dropping it into
+        # the "no price supplied" pile would tell the operator their file was
+        # empty when in fact it was rejected.
+        for item in analysis.priced:
+            if item.exclusion:
+                lines.append(f"  {item.offer.label} : {item.exclusion}")
         for refused in analysis.resolved.request.refused_markets:
             lines.append(
                 f"  {refused} : cote reçue mais écartée — ce marché ne se déduit pas "

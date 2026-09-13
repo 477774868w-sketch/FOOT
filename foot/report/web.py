@@ -329,6 +329,14 @@ def render_result(result: JourneyResult, *, budget: float | None, combine: bool)
             + "".join(f"<li>{html.escape(line)}</li>" for line in result.rejected)
             + "</ul></div>"
         )
+    if result.notes:
+        parts.append(
+            '<div class="note"><strong>Lignes lues mais écartées de cette '
+            "analyse</strong> — le dossier sportif n'en dépend pas&nbsp;:"
+            '<ul class="rejets">'
+            + "".join(f"<li>{html.escape(note)}</li>" for note in result.notes)
+            + "</ul></div>"
+        )
     if result.used:
         parts.append(
             # Same wording as the terminal: the two surfaces answer the same

@@ -149,6 +149,8 @@ class PricedOffer:
     profile: SettlementProfile
     quoted_at: dt.datetime | None = None
     as_of: dt.datetime | None = None
+    exclusion: str = ""
+    """Why a supplied price was refused, when one was and could not be used."""
 
     # -- Model side (always available) ------------------------------------
     @property
@@ -186,6 +188,21 @@ class PricedOffer:
         if self.quoted_at is None or self.as_of is None:
             return None
         return self.as_of - self.quoted_at
+
+    @property
+    def age_known(self) -> bool:
+        """Whether this price's age is known, when knowing it is expected.
+
+        A price nobody timed is not a fresh price: it is a price of **unknown**
+        age, and treating the two alike let an odd of unknown provenance pass
+        the staleness check as though it had just been observed.
+
+        The question only arises for a **dated** analysis: with no ``as_of``
+        there is no freshness check to fail, so an untimed price is not a gap.
+        """
+        if not self.has_price or self.as_of is None:
+            return True
+        return self.quoted_at is not None
 
     def is_stale(self, *, limit_hours: float = 12.0) -> bool:
         """A quote older than ``limit_hours`` is treated as unreliable."""
@@ -256,13 +273,33 @@ def price_catalogue(
             )
             continue
         if isinstance(quote, Quote):
+            # `None` here means "nobody recorded when this was quoted", which is
+            # *not* the same as "quoted now": substituting the run's instant
+            # manufactured a freshness the price never had.
             price, moment, book = (
                 quote.price,
-                quote.quoted_at if quote.quoted_at is not None else quoted_at,
+                quote.quoted_at,
                 quote.bookmaker if quote.bookmaker is not None else bookmaker,
             )
         else:
             price, moment, book = quote, quoted_at, bookmaker
+        if moment is not None and as_of is not None and moment > as_of:
+            # A price observed after the analysis instant did not exist at that
+            # instant. Using it would be look-ahead, and the staleness check
+            # cannot catch it: a negative age is not "too old".
+            priced.append(
+                PricedOffer(
+                    offer=offer,
+                    profile=price_offer(offer, matrix),
+                    as_of=as_of,
+                    exclusion=(
+                        f"cote relevée le "
+                        f"{moment.strftime('%Y-%m-%d %H:%M %Z')}, postérieure à "
+                        f"l'heure d'analyse : exclue de cette analyse"
+                    ),
+                )
+            )
+            continue
         priced.append(
             PricedOffer(
                 offer=offer.with_odds(price, bookmaker=book),
