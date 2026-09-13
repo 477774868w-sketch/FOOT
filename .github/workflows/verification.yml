@@ -1,0 +1,75 @@
+name: vérification
+
+# Les tests déterministes bloquent la fusion ; les tests réseau informent sans
+# bloquer, parce qu'un hôte injoignable est un fait d'environnement et non un
+# défaut du code.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministe:
+    name: tests déterministes, ruff, mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Outils de vérification
+        run: python -m pip install --upgrade pip pytest ruff mypy
+
+      - name: Lanceur sans aucune dépendance
+        # Passe en premier : si la suite exige pytest pour tourner, la promesse
+        # « zéro dépendance » du projet n'est pas tenue.
+        run: python3 tests/run_tests.py --sans-reseau
+
+      - name: pytest (réseau exclu), décompte séparé
+        run: pytest -m "not network" -rs
+
+      - name: ruff
+        run: ruff check .
+
+      - name: mypy
+        run: mypy .
+
+      - name: Le protocole stocké correspond au code
+        # Le fichier de protocole est généré : s'il diverge du code, la
+        # description publiée ne décrit plus ce qui s'exécute.
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          from foot.analysis.rubrics import dump_rubrics
+          stored = pathlib.Path("protocole/protocole-22-rubriques.json").read_text(encoding="utf-8")
+          if stored != dump_rubrics():
+              sys.exit("protocole/protocole-22-rubriques.json est désynchronisé du code")
+          print("protocole synchronisé")
+          PY
+
+  reseau:
+    name: sources en ligne (informatif)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install --upgrade pip pytest
+
+      - name: pytest -m network
+        # -rs affiche le motif de chaque test ignoré : un test qui ne s'exécute
+        # pas ne doit jamais se confondre avec un test qui réussit.
+        run: pytest -m "network" -rs

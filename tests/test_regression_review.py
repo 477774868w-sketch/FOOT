@@ -626,16 +626,22 @@ def test_r8g_imported_lineups_feed_the_t75_check_and_its_verdict() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         (root / "compos.csv").write_text(
-            "date,equipe,joueur,poste,titulaire,source,statut\n"
-            "14/09/2026,Club A,Dupont,gardien,oui,Club A (officiel),officiel\n"
-            "14/09/2026,Club A,Bernard,defenseur,oui,Club A (officiel),officiel\n"
-            "14/09/2026,Club B,Leroy,gardien,oui,Club B (officiel),officiel\n",
+            "date,equipe,joueur,poste,titulaire,source,statut,publication\n"
+            "14/09/2026,Club A,Dupont,gardien,oui,Club A (officiel),officiel,"
+            "14/09/2026 19:30\n"
+            "14/09/2026,Club A,Bernard,defenseur,oui,Club A (officiel),officiel,"
+            "14/09/2026 19:30\n"
+            "14/09/2026,Club B,Leroy,gardien,oui,Club B (officiel),officiel,"
+            "14/09/2026 19:30\n",
             encoding="utf-8",
         )
         supplements = load_supplements(lineups_csv=root / "compos.csv")
+        # A team sheet exists at T−60, not the day before: the check is posed
+        # when the data can actually be published.
         run = _engine().run(
             "Club A - Club B 14/09/2026 20:45 @ 2.10 3.40 3.60",
-            as_of=AS_OF, bookmaker="T", supplements=supplements,
+            as_of=dt.datetime(2026, 9, 14, 19, 45, tzinfo=PARIS),
+            bookmaker="T", supplements=supplements,
         )
     analysis = run.analyses[0]
     assert analysis.analysed
@@ -708,20 +714,22 @@ def test_r8i_the_counter_analysis_stops_claiming_missing_data_once_supplied() ->
             encoding="utf-8",
         )
         (root / "compos.csv").write_text(
-            "date,equipe,joueur,poste,titulaire,source,statut\n"
-            "14/09/2026,Club A,Dupont,gardien,oui,Club A (officiel),officiel\n",
+            "date,equipe,joueur,poste,titulaire,source,statut,publication\n"
+            "14/09/2026,Club A,Dupont,gardien,oui,Club A (officiel),officiel,"
+            "14/09/2026 19:30\n",
             encoding="utf-8",
         )
         supplements = load_supplements(
             xg_csv=root / "xg.csv", lineups_csv=root / "compos.csv"
         )
+        at_kickoff = dt.datetime(2026, 9, 14, 19, 45, tzinfo=PARIS)
         run = _engine().run(
             "Club A - Club B 14/09/2026 20:45 @ 2.10 3.40 3.60",
-            as_of=AS_OF, bookmaker="T", supplements=supplements,
+            as_of=at_kickoff, bookmaker="T", supplements=supplements,
         )
         bare = _engine().run(
             "Club A - Club B 14/09/2026 20:45 @ 2.10 3.40 3.60",
-            as_of=AS_OF, bookmaker="T",
+            as_of=at_kickoff, bookmaker="T",
         )
 
     supplied_text = " ".join(run.analyses[0].sealed.dossier.counter_analysis)  # type: ignore[union-attr]
@@ -882,13 +890,16 @@ def test_r8e_declared_operator_imports_are_actually_implemented() -> None:
 def test_r8f_supplied_context_fills_rubrics_and_documents_scenarios() -> None:
     """xG et absences importés remplissent leurs rubriques et créent un scénario sourcé."""
     history = _controlled_history()
-    recent = [m for m in history if m.involves("Club A")][-4:]
+    # A wide sample with a sharp gap: the xG scenario now requires the credible
+    # interval to exclude "no gap", so four matches at a mild ratio no longer
+    # qualify — and must not, on that evidence.
+    recent = [m for m in history if m.involves("Club A")][-12:]
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         (root / "xg.csv").write_text(
             "date,home,away,home_xg,away_xg,source,statut\n"
             + "".join(
-                f"{m.date.strftime('%d/%m/%Y')},{m.home},{m.away},0.70,0.70,Understat,probable\n"
+                f"{m.date.strftime('%d/%m/%Y')},{m.home},{m.away},0.20,0.20,Understat,probable\n"
                 for m in recent
             ),
             encoding="utf-8",
@@ -916,7 +927,7 @@ def test_r8f_supplied_context_fills_rubrics_and_documents_scenarios() -> None:
 
     # One magnitude is measured, the other is declared a hypothesis.
     bases = " ".join(s.basis for s in documented)
-    assert "MESURÉE" in bases
+    assert "MESURÉ" in bases
     assert "HYPOTHÈSE" in bases
 
     by_number = {a.rubric.number: a for a in analysis.rubrics}

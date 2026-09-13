@@ -19,7 +19,7 @@ from pathlib import Path
 from foot.domain import Fixture, Match, MatchLog, Score
 from foot.market.odds import MatchOdds
 
-__all__ = ["load_matches", "load_odds", "write_matches"]
+__all__ = ["load_fixtures", "load_matches", "load_odds", "write_matches"]
 
 _DATE_FORMATS = ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%m/%d/%Y", "%d.%m.%Y")
 
@@ -84,6 +84,46 @@ def load_matches(
                 )
             )
     return MatchLog(matches)
+
+
+def load_fixtures(
+    path: str | Path,
+    *,
+    competition: str | None = None,
+    date_formats: Sequence[str] = _DATE_FORMATS,
+    encoding: str = "utf-8-sig",
+) -> tuple[Fixture, ...]:
+    """Read upcoming fixtures from a CSV file: ``date, home, away [, neutre]``.
+
+    The operator needs this route wherever no automatic calendar reaches: a
+    fixture that cannot be verified is never recommended, so without it a whole
+    competition stays unanalysable however good the history is.
+    """
+    fixtures: list[Fixture] = []
+    with Path(path).open(newline="", encoding=encoding) as handle:
+        for row in csv.DictReader(handle):
+            try:
+                date = parse_date(_pick(row, _DATE_ALIASES, label="date"), date_formats)
+                home = _pick(row, _HOME_ALIASES, label="home team").strip()
+                away = _pick(row, _AWAY_ALIASES, label="away team").strip()
+            except (KeyError, ValueError):
+                continue
+            if not home or not away:
+                continue
+            neutral = (row.get("neutre") or row.get("neutral") or "").strip().lower()
+            fixtures.append(
+                Fixture(
+                    home=home,
+                    away=away,
+                    date=date,
+                    neutral=neutral in ("oui", "yes", "true", "1"),
+                    competition=competition
+                    or row.get("Div")
+                    or row.get("competition")
+                    or "",
+                )
+            )
+    return tuple(fixtures)
 
 
 def load_odds(

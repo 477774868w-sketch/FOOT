@@ -11,7 +11,11 @@
     "adapter": "",
     "operator_import": "",
     "treatment": "résolution des noms saisis contre le calendrier chargé ; la date doit correspondre exactement, aucune rencontre n'est glissée",
-    "effect": "une rencontre non vérifiée au calendrier bloque toute recommandation prématch"
+    "effect": "une rencontre non vérifiée au calendrier bloque toute recommandation prématch",
+    "protocol_sections": [
+      "§3"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 2,
@@ -23,7 +27,11 @@
     "adapter": "",
     "operator_import": "",
     "treatment": "chaque fait entre au registre avec son URL, sa date de fait et sa date de relevé ; l'indépendance se compte sur le fournisseur amont",
-    "effect": "les contradictions restent visibles et abaissent la confiance"
+    "effect": "les contradictions restent visibles et abaissent la confiance",
+    "protocol_sections": [
+      "§2"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 3,
@@ -35,7 +43,11 @@
     "adapter": "",
     "operator_import": "",
     "treatment": "liste blanche à l'entrée de la phase sportive, empreinte SHA-256 au scellement, journal d'exposition aux cotes",
-    "effect": "une exposition antérieure au scellement est signalée dans la fiche"
+    "effect": "une exposition antérieure au scellement est signalée dans la fiche",
+    "protocol_sections": [
+      "§14"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 4,
@@ -49,7 +61,11 @@
     "adapter": "foot.collect.openfootball",
     "operator_import": "",
     "treatment": "tous les résultats disponibles entrent dans la vraisemblance, pondérés par une demi-vie",
-    "effect": "fixe attaque[équipe] et défense[équipe], donc les buts attendus"
+    "effect": "fixe attaque[équipe] et défense[équipe], donc les buts attendus",
+    "protocol_sections": [
+      "§4"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 5,
@@ -63,7 +79,11 @@
     "adapter": "foot.collect.openfootball",
     "operator_import": "",
     "treatment": "estimation conjointe de toutes les équipes : la force adverse est un paramètre, pas une correction ajoutée après coup",
-    "effect": "un résultat contre une équipe forte pèse davantage, structurellement"
+    "effect": "un résultat contre une équipe forte pèse davantage, structurellement",
+    "protocol_sections": [
+      "§4"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 6,
@@ -77,7 +97,11 @@
     "adapter": "foot.collect.openfootball",
     "operator_import": "",
     "treatment": "paramètre d'avantage du terrain estimé sur toute la compétition",
-    "effect": "décale le taux de buts domicile ; mis à zéro sur terrain neutre"
+    "effect": "décale le taux de buts domicile ; mis à zéro sur terrain neutre",
+    "protocol_sections": [
+      "§5"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 7,
@@ -90,8 +114,20 @@
     "feeds_model": true,
     "adapter": "",
     "operator_import": "--xg-csv",
-    "treatment": "comparaison buts marqués / xG sur les dix derniers matchs",
-    "effect": "écart buts−xG signalé et converti en scénario de sur-performance ; n'entre pas dans l'estimation, faute de calibration validée"
+    "treatment": "comparaison buts marqués / xG sur les dix derniers matchs, régularisée (postérieur Gamma-Poisson)",
+    "effect": "écart buts−xG signalé avec son incertitude et converti en scénario de retour au niveau xG ; n'entre pas dans l'estimation, faute de calibration validée",
+    "protocol_sections": [
+      "§6"
+    ],
+    "sub_requirements": [
+      "buts",
+      "xG",
+      "npxG",
+      "xGA",
+      "tirs",
+      "grosses occasions",
+      "qualité des tirs"
+    ]
   },
   {
     "number": 8,
@@ -105,7 +141,11 @@
     "adapter": "",
     "operator_import": "",
     "treatment": "nécessite les événements horodatés du match",
-    "effect": "aucun : la donnée n'est pas disponible et n'est pas reconstituée"
+    "effect": "aucun : la donnée n'est pas disponible et n'est pas reconstituée",
+    "protocol_sections": [
+      "§7"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 9,
@@ -119,7 +159,11 @@
     "adapter": "",
     "operator_import": "",
     "treatment": "segmentation par état du score, impossible sans flux d'événements",
-    "effect": "aucun : explicitement déclaré indisponible plutôt qu'approché"
+    "effect": "aucun : explicitement déclaré indisponible plutôt qu'approché",
+    "protocol_sections": [
+      "§21"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 10,
@@ -133,7 +177,11 @@
     "adapter": "",
     "operator_import": "--compositions-csv",
     "treatment": "relevé du gardien annoncé et de son statut (probable / officiel)",
-    "effect": "un changement de gardien déclenche une réévaluation du dossier"
+    "effect": "un changement de gardien déclenche une réévaluation du dossier",
+    "protocol_sections": [
+      "§8"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 11,
@@ -147,7 +195,11 @@
     "adapter": "",
     "operator_import": "--absences-csv",
     "treatment": "liste d'absences avec poste et statut de confirmation",
-    "effect": "produit un scénario sportif documenté, cité en source, qui peut faire rejeter un pari ; n'applique aucun coefficient arbitraire"
+    "effect": "produit un scénario sportif documenté, cité en source, qui peut faire rejeter un pari ; n'applique aucun coefficient arbitraire",
+    "protocol_sections": [
+      "§9"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 12,
@@ -161,7 +213,11 @@
     "adapter": "",
     "operator_import": "",
     "treatment": "nécessite la composition et le dispositif annoncés",
-    "effect": "aucun : non développé"
+    "effect": "aucun : non développé",
+    "protocol_sections": [
+      "§10"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 13,
@@ -175,7 +231,11 @@
     "adapter": "foot.collect.openfootball",
     "operator_import": "",
     "treatment": "jours écoulés depuis le dernier match, par équipe",
-    "effect": "affiché seulement ; aucun coefficient de fatigue n'est appliqué faute d'estimation validée"
+    "effect": "affiché seulement ; aucun coefficient de fatigue n'est appliqué faute d'estimation validée",
+    "protocol_sections": [
+      "§12"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 14,
@@ -189,7 +249,12 @@
     "adapter": "",
     "operator_import": "",
     "treatment": "nécessite les événements détaillés",
-    "effect": "aucun : non développé"
+    "effect": "aucun : non développé",
+    "protocol_sections": [
+      "§11",
+      "§21"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 15,
@@ -204,7 +269,11 @@
     "adapter": "foot.collect.footballdata",
     "operator_import": "",
     "treatment": "l'arbitre figure dans l'archive football-data.co.uk ; la météo exigerait un fournisseur distinct",
-    "effect": "aucun ici : l'archive est inaccessible depuis cet environnement"
+    "effect": "aucun ici : l'archive est inaccessible depuis cet environnement",
+    "protocol_sections": [
+      "§12"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 16,
@@ -216,7 +285,11 @@
     "adapter": "",
     "operator_import": "",
     "treatment": "chaque constat porte son type, sa variable et son effet, ou la mention « affiché seulement »",
-    "effect": "la fiche sépare les informations utilisées des informations montrées"
+    "effect": "la fiche sépare les informations utilisées des informations montrées",
+    "protocol_sections": [
+      "§22"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 17,
@@ -230,7 +303,12 @@
     "adapter": "foot.collect.openfootball",
     "operator_import": "",
     "treatment": "Dixon-Coles pondéré, régularisation inversement proportionnelle au nombre de matchs effectifs, Elo en contrôle croisé",
-    "effect": "fournit la loi jointe des scores dont dérivent tous les marchés"
+    "effect": "fournit la loi jointe des scores dont dérivent tous les marchés",
+    "protocol_sections": [
+      "§15",
+      "§21"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 18,
@@ -242,7 +320,11 @@
     "adapter": "",
     "operator_import": "",
     "treatment": "scénarios typés : sensibilité, incertitude d'estimation, événement sportif documenté",
-    "effect": "seules la sensibilité et les événements documentés peuvent rejeter un pari ; l'incertitude d'estimation est rapportée, pas filtrante"
+    "effect": "seules la sensibilité et les événements documentés peuvent rejeter un pari ; l'incertitude d'estimation est rapportée, pas filtrante",
+    "protocol_sections": [
+      "§13"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 19,
@@ -256,7 +338,11 @@
     "adapter": "foot.collect.footballdata",
     "operator_import": "cotes saisies (1=, N=, 2=, BTTS:, TOTAL:, DC:, DNB:, AH:, TE:)",
     "treatment": "chaque cote fournie est réglée sur la même loi jointe, remboursements et demi-règlements compris",
-    "effect": "classe les marchés par croissance logarithmique ; la fiche nomme ceux qui ont réellement été comparés"
+    "effect": "classe les marchés par croissance logarithmique ; la fiche nomme ceux qui ont réellement été comparés",
+    "protocol_sections": [
+      "§13"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 20,
@@ -268,7 +354,11 @@
     "adapter": "",
     "operator_import": "",
     "treatment": "unions, intersections et lignes quart calculées case par case sur la grille des scores",
-    "effect": "seuils de prix résolus sur le profil de règlement exact"
+    "effect": "seuils de prix résolus sur le profil de règlement exact",
+    "protocol_sections": [
+      "§14"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 21,
@@ -282,7 +372,11 @@
     "adapter": "",
     "operator_import": "--compositions-csv",
     "treatment": "contrôles planifiés à T−75 et T−60, statut probable puis officiel",
-    "effect": "un changement décisif produit un nouveau dossier scellé qui remplace l'ancien, avec sa raison"
+    "effect": "un changement décisif produit un nouveau dossier scellé qui remplace l'ancien, avec sa raison",
+    "protocol_sections": [
+      "§17"
+    ],
+    "sub_requirements": []
   },
   {
     "number": 22,
@@ -294,6 +388,13 @@
     "adapter": "",
     "operator_import": "",
     "treatment": "confiance A/B/C/D fondée sur la couverture, la convergence et les contradictions — jamais sur la probabilité de gain",
-    "effect": "une confiance D ou un modèle non convergé interdisent la recommandation"
+    "effect": "une confiance D ou un modèle non convergé interdisent la recommandation",
+    "protocol_sections": [
+      "§16",
+      "§18",
+      "§19",
+      "§20"
+    ],
+    "sub_requirements": []
   }
 ]

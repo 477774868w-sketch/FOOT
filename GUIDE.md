@@ -1,5 +1,9 @@
 # Guide d'utilisation — analyse de rencontres
 
+> **Vous débutez ?** Lisez plutôt [DEMARRAGE.md](DEMARRAGE.md) : cinq minutes,
+> ouvrir l'application et analyser un match. Ce guide-ci est la référence
+> complète.
+
 Python 3.10 ou plus récent. **Aucune dépendance à installer.**
 
 ```console
@@ -75,24 +79,60 @@ $ python3 -m foot analyser --fichier matchs.txt \
 
 | Fichier | Colonnes |
 |---|---|
-| `--xg-csv` | `date,home,away,home_xg,away_xg[,source,statut]` |
-| `--absences-csv` | `date,equipe,joueur[,poste,motif,source,statut]` |
-| `--compositions-csv` | `date,equipe,joueur[,poste,titulaire,source,statut]` |
+| `--xg-csv` | `date,home,away,home_xg,away_xg[,source,statut,publication]` |
+| `--absences-csv` | `date,equipe,joueur[,poste,motif,source,statut,remplacant,jusqu_au,retour]` |
+| `--compositions-csv` | `date,equipe,joueur[,poste,titulaire,source,statut,publication,adversaire]` |
+
+**Trois dates, jamais confondues.** `date` porte le fait — jour du match pour
+une ligne xG, jour de l'annonce pour une absence, jour de la rencontre pour une
+feuille. `publication` porte l'instant où l'information est devenue publique :
+**avec une heure elle fait foi**, sans heure l'antériorité n'est pas démontrable
+dans la journée et la ligne n'est réputée connue que le lendemain à 00:00. Pour
+qu'une composition officielle relevée à T−60 compte le soir même, donnez l'heure :
+`14/09/2026 19:30`.
+
+**Une feuille appartient à une rencontre**, pas à une équipe en général : sa
+`date` doit être celle du match. Chaque équipe garde son propre statut — une
+feuille officielle à domicile ne rend pas officielle la feuille probable de
+l'adversaire — et la complétude est dite : moins de onze titulaires reste une
+composition **partielle**, et le contrôle n'est pas clos.
+
+**Une absence a une durée.** `jusqu_au` la borne, `retour` l'annule à partir
+d'une date confirmée. Sans l'un ni l'autre, elle vaut 21 jours — chiffre déclaré
+comme hypothèse, pas mesuré.
+
+**Une ligne illisible est rejetée avec son motif**, jamais devinée : valeur non
+finie, xG négatif, date illisible, doublon. Le motif remonte jusqu'à l'interface
+pour que vous puissiez corriger.
 
 `statut` vaut `officiel` ou `probable` : une composition probable n'est jamais
 présentée comme officielle. Ces données **n'entrent pas dans l'estimation** —
 aucune calibration d'une vraisemblance pondérée par les xG n'a été validée ici.
-Elles servent à construire des **scénarios sportifs documentés**, les seuls
-habilités à faire rejeter un pari, et chacun cite sa source.
+Elles servent à construire des **scénarios sportifs documentés**, et chacun cite
+sa source.
+
+### Ce que fait chaque type de scénario
+
+Trois rôles, jamais confondus — le code et cette page disent désormais la même
+chose, ce qui n'était pas le cas avant la revue :
+
+| Type | Rôle | Pourquoi |
+|---|---|---|
+| **événement sportif documenté** | **écarte** un pari | c'est un fait sourcé : une absence rapportée, un écart buts/xG mesuré |
+| **sensibilité** (±15 %) | **déclasse** sans écarter | la variation est arbitraire ; elle mesure la fragilité, donc elle ordonne le classement et pèse sur la confiance, mais elle ne peut pas décider seule |
+| **incertitude d'estimation** (±1 σ) | **informe** seulement | c'est une bande bilatérale autour de l'estimation, pas un événement défavorable ; s'en servir comme plancher rejetterait tout marché sur tout échantillon réaliste, en prétendant que le rejet parle de football |
+
+La fiche nomme, pour le pari retenu, le scénario qui produit sa pire espérance
+**et** son type.
 
 Ce que chaque fichier change, mesuré sur un parcours réel (Napoli – Bologna,
 Serie A 2026-27) :
 
 | Import | Effet vérifié |
 |---|---|
-| `--xg-csv` | R07 renseignée : buts marqués contre xG fournis, et un scénario « retour au niveau xG » par équipe, dont l'ampleur est **mesurée** sur l'écart |
-| `--absences-csv` | R11 renseignée ; une absence à un poste suivi crée un scénario sportif documenté (ampleur déclarée **hypothèse**, jamais présentée comme mesurée) |
-| `--compositions-csv` | R10 et R21 renseignées ; le contrôle T−75/T−60 porte sur la feuille fournie et rend un **verdict de réévaluation motivé** |
+| `--xg-csv` | R07 renseignée **partiellement** : la rubrique réunit buts, xG, npxG, xGA, tirs, grosses occasions et qualité des tirs — la fiche nomme ce qui est couvert et ce qui manque. L'écart buts/xG est estimé par un postérieur Gamma-Poisson : il ne produit un scénario que si son intervalle de crédibilité exclut « aucun écart », donc pas sur un match isolé |
+| `--absences-csv` | R11 renseignée ; une absence à un poste suivi crée un scénario sportif documenté. Le barème agit **par poste et sur le bon canal** : un gardien absent fait monter l'attaque adverse, un buteur fait baisser la sienne ; un remplaçant nommé atténue l'effet de moitié. Ces amplitudes sont des **hypothèses déclarées**, non calibrées |
+| `--compositions-csv` | R10 et R21 renseignées ; le contrôle T−75/T−60 porte sur la feuille fournie et rend un **verdict de réévaluation motivé**. Une feuille plus récente remplace la précédente, qui reste visible |
 
 Les lignes xG doivent désigner des matchs présents dans l'historique chargé
 (mêmes noms d'équipes, mêmes dates). Sinon la fiche le dit explicitement —
@@ -109,12 +149,34 @@ $ python3 -m foot analyser --fichier mes_matchs.txt \
       --date 2026-09-13T12:00 --fuseau Europe/Paris --bookmaker Pinnacle
 ```
 
-ou en interface web, en français :
+ou en interface web, en français, utilisable sur téléphone :
 
 ```console
 $ python3 -m foot web
 Interface disponible sur http://127.0.0.1:8000  (Ctrl+C pour arrêter)
 ```
+
+Cette adresse est **locale** : elle ne vaut que sur la machine qui a lancé la
+commande, et aucun service en ligne n'est hébergé. Pour l'ouvrir depuis un
+téléphone du même réseau :
+
+```console
+$ python3 -m foot web --hote 0.0.0.0
+```
+
+puis `http://ADRESSE-LOCALE-DE-L-ORDINATEUR:8000`. Les deux modes ont été
+vérifiés. N'exposez pas ce port sur Internet : l'interface n'a ni
+authentification ni chiffrement.
+
+Le navigateur offre **tout ce que la ligne de commande offre** — rencontres,
+date, fuseau, bookmaker, budget, combiné, et les trois zones de contexte (xG,
+absences, compositions) à coller directement. Les deux surfaces passent par la
+même fonction `analyse_form()`, donc par le même `engine.run()` : à entrées
+identiques elles produisent la **même empreinte de dossier et la même
+décision**, ce qu'un test vérifie (`test_d6b`).
+
+Les lignes de contexte refusées sont **affichées pour correction**, et la page
+indique ce qui a réellement été retenu.
 
 ### Lire les choix
 
@@ -279,6 +341,7 @@ Résultat mesuré sur 790 matchs réels de Premier League (2024-25 à 2026-27),
 
 ```
   réglé (régularisation)     RPS=0.21000   skill +8.35%
+  configuration de production RPS=0.21024  skill +8.24%   ← celle qui recommande
   référence                  RPS=0.21040   skill +8.17%
   sans correction bas scores RPS=0.21052   skill +8.12%
   sans régularisation        RPS=0.21075   skill +8.02%
@@ -310,16 +373,34 @@ les fenêtres de test s'y chevauchaient aux dates frontières.
 ## 7. Vérifier
 
 ```console
-$ pytest                         # 241 réussis, 1 ignoré
-$ python3 tests/run_tests.py     # les mêmes, sans rien installer
-$ ruff check . && mypy .         # propres sur 79 fichiers
+$ pytest -m "not network"        # 267 réussis, 1 ignoré, 8 déselectionnés
+$ python3 tests/run_tests.py --sans-reseau   # les mêmes, sans rien installer
+$ ruff check . && mypy .         # propres sur 82 fichiers
 ```
 
 Le lanceur sans dépendance compte **séparément** réussites, échecs et ignorés :
 
 ```
-241 réussi(s), 0 échec(s), 1 ignoré(s) sur 242 en 52.35s
+267 réussi(s), 0 échec(s), 1 ignoré(s) sur 268 en 30.9s
 ```
 
 Un test qui ne peut pas s'exécuter lève `unittest.SkipTest` et apparaît comme
 ignoré — jamais comme réussi.
+
+Les tests **réseau** sont séparés des tests déterministes, dans les deux
+lanceurs :
+
+```console
+$ pytest -m network              # 8 réussis — dépend des hôtes atteignables
+```
+
+**Intégration continue.** `.github/workflows/verification.yml` exécute sur
+chaque poussée et chaque *pull request* :
+
+- un job **bloquant** — le lanceur sans dépendance d'abord (si la suite exigeait
+  pytest, la promesse « zéro dépendance » ne serait pas tenue), puis
+  `pytest -m "not network" -rs`, `ruff`, `mypy`, et un contrôle que le protocole
+  stocké dans `protocole/` correspond bien au code ;
+- un job **réseau informatif** (`continue-on-error`) : un hôte injoignable est
+  un fait d'environnement, pas un défaut du code, et ne doit pas bloquer une
+  fusion.

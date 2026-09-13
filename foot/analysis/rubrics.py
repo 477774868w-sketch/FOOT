@@ -33,6 +33,7 @@ __all__ = [
     "RubricImplementation",
     "RubricPhase",
     "RubricStatus",
+    "dump_rubrics",
     "load_rubrics",
 ]
 
@@ -126,6 +127,25 @@ class Rubric:
     effect: str = ""
     """What the processed data actually changes in the forecast or the decision."""
 
+    protocol_sections: tuple[str, ...] = ()
+    """Sections of the operator's own protocol this rubric serves.
+
+    The grid's numbering is **not** the protocol's: the engine's findings carry
+    hard-coded rubric numbers, so renumbering them to match the document would
+    silently break every one of them.  The correspondence is declared here
+    instead, which keeps both readable and lets a test prove no section of the
+    protocol is left unattached.
+    """
+
+    sub_requirements: tuple[str, ...] = ()
+    """The distinct things this rubric asks for, when it asks for several.
+
+    A rubric titled « Buts, xG, npxG, xGA, tirs, grosses occasions » is not
+    answered because one xG file was imported.  Listing the parts is what lets
+    the report say *which* of them is actually covered, instead of turning a
+    quarter of an answer into a tick.
+    """
+
     def implementation(
         self, *, available: frozenset[Capability], adapters_built: frozenset[str]
     ) -> RubricImplementation:
@@ -166,6 +186,14 @@ class RubricAssessment:
     effect: str = ""
     """What changed as a result — in the forecast, or explicitly nothing."""
 
+    satisfied: tuple[str, ...] = ()
+    """Sub-requirements actually met, among :attr:`Rubric.sub_requirements`."""
+
+    @property
+    def missing_requirements(self) -> tuple[str, ...]:
+        met = set(self.satisfied)
+        return tuple(r for r in self.rubric.sub_requirements if r not in met)
+
     def render(self) -> str:
         line = (
             f"{self.status.symbol} {self.implementation.symbol} "
@@ -191,6 +219,14 @@ class RubricAssessment:
             lines.append(f"    traitement: {self.treatment}")
         if self.effect:
             lines.append(f"    effet     : {self.effect}")
+        if self.rubric.sub_requirements:
+            lines.append(
+                "    couvert   : "
+                + (", ".join(self.satisfied) if self.satisfied else "rien")
+            )
+            missing = self.missing_requirements
+            if missing:
+                lines.append(f"    manquant  : {', '.join(missing)}")
         if self.blocker:
             lines.append(f"    blocage   : {self.blocker}")
         if self.evidence_keys:
@@ -210,10 +246,13 @@ def _r(
     operator_import: str = "",
     treatment: str = "",
     effect: str = "",
+    sections: Iterable[str] = (),
+    sub_requirements: Iterable[str] = (),
 ) -> Rubric:
     return Rubric(
         number, title, phase, frozenset(requires), detail, feeds_model,
-        adapter, operator_import, treatment, effect,
+        adapter, operator_import, treatment, effect, tuple(sections),
+        tuple(sub_requirements),
     )
 
 
@@ -225,118 +264,172 @@ RUBRICS: tuple[Rubric, ...] = (
        treatment="résolution des noms saisis contre le calendrier chargé ; la date "
                  "doit correspondre exactement, aucune rencontre n'est glissée",
        effect="une rencontre non vérifiée au calendrier bloque toute recommandation "
-              "prématch"),
+              "prématch",
+       sections=("§3",)),
     _r(2, "Traçabilité des sources et statut de confirmation", RubricPhase.IDENTIFICATION,
        detail="Valeur, unité, source, fournisseur d'origine, date du fait, "
               "date de publication, date de récupération, statut.",
        treatment="chaque fait entre au registre avec son URL, sa date de fait et sa "
                  "date de relevé ; l'indépendance se compte sur le fournisseur amont",
-       effect="les contradictions restent visibles et abaissent la confiance"),
+       effect="les contradictions restent visibles et abaissent la confiance",
+       sections=("§2",)),
     _r(3, "Séparation sport / cotes et scellement du dossier", RubricPhase.IDENTIFICATION,
        detail="as_of fixé, dossier sportif scellé et empreinté avant toute "
               "lecture du marché.",
        treatment="liste blanche à l'entrée de la phase sportive, empreinte SHA-256 "
                  "au scellement, journal d'exposition aux cotes",
-       effect="une exposition antérieure au scellement est signalée dans la fiche"),
+       effect="une exposition antérieure au scellement est signalée dans la fiche",
+       sections=("§14",)),
     _r(4, "Forme récente (5 à 10 matchs) dans un historique long", RubricPhase.SPORT,
        [Capability.RESULTS], feeds_model=True, adapter="foot.collect.openfootball",
        treatment="tous les résultats disponibles entrent dans la vraisemblance, "
                  "pondérés par une demi-vie",
-       effect="fixe attaque[équipe] et défense[équipe], donc les buts attendus"),
+       effect="fixe attaque[équipe] et défense[équipe], donc les buts attendus",
+       sections=("§4",)),
     _r(5, "Qualité des adversaires rencontrés, au niveau de l'époque", RubricPhase.SPORT,
        [Capability.RESULTS], feeds_model=True, adapter="foot.collect.openfootball",
        detail="Force des adversaires estimée à la date du match, pas aujourd'hui.",
        treatment="estimation conjointe de toutes les équipes : la force adverse est "
                  "un paramètre, pas une correction ajoutée après coup",
-       effect="un résultat contre une équipe forte pèse davantage, structurellement"),
+       effect="un résultat contre une équipe forte pèse davantage, structurellement",
+       sections=("§4",)),
     _r(6, "Différentiel domicile / extérieur et taille d'échantillon", RubricPhase.SPORT,
        [Capability.RESULTS], feeds_model=True, adapter="foot.collect.openfootball",
        treatment="paramètre d'avantage du terrain estimé sur toute la compétition",
-       effect="décale le taux de buts domicile ; mis à zéro sur terrain neutre"),
+       effect="décale le taux de buts domicile ; mis à zéro sur terrain neutre",
+       sections=("§5",)),
     _r(7, "Buts, xG, npxG, xGA, tirs, grosses occasions, qualité des tirs", RubricPhase.SPORT,
        [Capability.ADVANCED_STATS], feeds_model=True,
        operator_import="--xg-csv",
-       treatment="comparaison buts marqués / xG sur les dix derniers matchs",
-       effect="écart buts−xG signalé et converti en scénario de sur-performance ; "
-              "n'entre pas dans l'estimation, faute de calibration validée"),
+       treatment="comparaison buts marqués / xG sur les dix derniers matchs, "
+                 "régularisée (postérieur Gamma-Poisson)",
+       effect="écart buts−xG signalé avec son incertitude et converti en scénario "
+              "de retour au niveau xG ; n'entre pas dans l'estimation, faute de "
+              "calibration validée",
+       sub_requirements=(
+           "buts", "xG", "npxG", "xGA", "tirs", "grosses occasions",
+           "qualité des tirs",
+       ),
+       sections=("§6",)),
     _r(8, "Penalties, exclusions et périodes déformantes", RubricPhase.SPORT,
        [Capability.ADVANCED_STATS],
        treatment="nécessite les événements horodatés du match",
-       effect="aucun : la donnée n'est pas disponible et n'est pas reconstituée"),
+       effect="aucun : la donnée n'est pas disponible et n'est pas reconstituée",
+       sections=("§7",)),
     _r(9, "Performance à onze contre onze et selon l'état du score", RubricPhase.SPORT,
        [Capability.ADVANCED_STATS],
        detail="Exige des événements détaillés ; ne se déduit pas des totaux.",
        treatment="segmentation par état du score, impossible sans flux d'événements",
-       effect="aucun : explicitement déclaré indisponible plutôt qu'approché"),
+       effect="aucun : explicitement déclaré indisponible plutôt qu'approché",
+       sections=("§21",)),
     _r(10, "Gardien titulaire, remplaçant et indicateurs", RubricPhase.SPORT,
         [Capability.LINEUPS], operator_import="--compositions-csv",
         treatment="relevé du gardien annoncé et de son statut (probable / officiel)",
-        effect="un changement de gardien déclenche une réévaluation du dossier"),
+        effect="un changement de gardien déclenche une réévaluation du dossier",
+       sections=("§8",)),
     _r(11, "Absences, retours, minutes attendues et interactions", RubricPhase.SPORT,
         [Capability.INJURIES], operator_import="--absences-csv",
         treatment="liste d'absences avec poste et statut de confirmation",
         effect="produit un scénario sportif documenté, cité en source, qui peut "
-               "faire rejeter un pari ; n'applique aucun coefficient arbitraire"),
+               "faire rejeter un pari ; n'applique aucun coefficient arbitraire",
+       sections=("§9",)),
     _r(12, "Entraîneur, changement de système, confrontation de styles", RubricPhase.SPORT,
         [Capability.LINEUPS],
         treatment="nécessite la composition et le dispositif annoncés",
-        effect="aucun : non développé"),
+        effect="aucun : non développé",
+       sections=("§10",)),
     _r(13, "Repos, déplacements, rotation, prolongations récentes", RubricPhase.SPORT,
         [Capability.RESULTS], feeds_model=True, adapter="foot.collect.openfootball",
         detail="Jours de repos calculables depuis le calendrier des résultats.",
         treatment="jours écoulés depuis le dernier match, par équipe",
         effect="affiché seulement ; aucun coefficient de fatigue n'est appliqué "
-               "faute d'estimation validée"),
+               "faute d'estimation validée",
+       sections=("§12",)),
     _r(14, "Coups de pied arrêtés, transitions, banc, fins de match", RubricPhase.SPORT,
         [Capability.ADVANCED_STATS],
         treatment="nécessite les événements détaillés",
-        effect="aucun : non développé"),
+        effect="aucun : non développé",
+       sections=("§11", "§21")),
     _r(15, "Météo, pelouse et arbitre", RubricPhase.SPORT,
         [Capability.WEATHER, Capability.REFEREE], adapter="foot.collect.footballdata",
         treatment="l'arbitre figure dans l'archive football-data.co.uk ; la météo "
                   "exigerait un fournisseur distinct",
-        effect="aucun ici : l'archive est inaccessible depuis cet environnement"),
+        effect="aucun ici : l'archive est inaccessible depuis cet environnement",
+       sections=("§12",)),
     _r(16, "Liaison donnée → variable → effet sur la prévision", RubricPhase.MODEL,
         detail="Toute donnée affichée n'est pas une donnée utilisée ; la "
                "distinction est explicite.",
         treatment="chaque constat porte son type, sa variable et son effet, ou la "
                   "mention « affiché seulement »",
-        effect="la fiche sépare les informations utilisées des informations montrées"),
+        effect="la fiche sépare les informations utilisées des informations montrées",
+       sections=("§22",)),
     _r(17, "Modèle de référence, enrichissements et régularisation", RubricPhase.MODEL,
         [Capability.RESULTS], feeds_model=True, adapter="foot.collect.openfootball",
         detail="Poisson, Dixon-Coles et Elo comme références ; petits "
                "échantillons traités par régularisation.",
         treatment="Dixon-Coles pondéré, régularisation inversement proportionnelle "
                   "au nombre de matchs effectifs, Elo en contrôle croisé",
-        effect="fournit la loi jointe des scores dont dérivent tous les marchés"),
+        effect="fournit la loi jointe des scores dont dérivent tous les marchés",
+       sections=("§15", "§21")),
     _r(18, "Scénarios, contre-analyse et conditions d'invalidation", RubricPhase.MODEL,
         treatment="scénarios typés : sensibilité, incertitude d'estimation, "
                   "événement sportif documenté",
         effect="seules la sensibilité et les événements documentés peuvent rejeter "
-               "un pari ; l'incertitude d'estimation est rapportée, pas filtrante"),
+               "un pari ; l'incertitude d'estimation est rapportée, pas filtrante",
+       sections=("§13",)),
     _r(19, "Comparaison des marchés disponibles", RubricPhase.MARKET,
         [Capability.ODDS], adapter="foot.collect.footballdata",
         operator_import="cotes saisies (1=, N=, 2=, BTTS:, TOTAL:, DC:, DNB:, AH:, TE:)",
         treatment="chaque cote fournie est réglée sur la même loi jointe, "
                   "remboursements et demi-règlements compris",
         effect="classe les marchés par croissance logarithmique ; la fiche nomme "
-               "ceux qui ont réellement été comparés"),
+               "ceux qui ont réellement été comparés",
+       sections=("§13",)),
     _r(20, "Calculs de marché : loi jointe et règlements asiatiques", RubricPhase.MARKET,
         treatment="unions, intersections et lignes quart calculées case par case "
                   "sur la grille des scores",
-        effect="seuils de prix résolus sur le profil de règlement exact"),
+        effect="seuils de prix résolus sur le profil de règlement exact",
+       sections=("§14",)),
     _r(21, "Compositions probables puis officielles, et réévaluation", RubricPhase.MARKET,
         [Capability.LINEUPS], operator_import="--compositions-csv",
         treatment="contrôles planifiés à T−75 et T−60, statut probable puis officiel",
         effect="un changement décisif produit un nouveau dossier scellé qui "
-               "remplace l'ancien, avec sa raison"),
+               "remplace l'ancien, avec sa raison",
+       sections=("§17",)),
     _r(22, "Décision, confiance, risque et restitution", RubricPhase.REPORT,
         treatment="confiance A/B/C/D fondée sur la couverture, la convergence et "
                   "les contradictions — jamais sur la probabilité de gain",
         effect="une confiance D ou un modèle non convergé interdisent la "
-               "recommandation"),
+               "recommandation",
+       sections=("§16", "§18", "§19", "§20")),
 )
 assert len(RUBRICS) == 22, "la grille doit compter exactement 22 rubriques"
+
+
+def dump_rubrics(rubrics: Sequence[Rubric] = RUBRICS) -> str:
+    """Serialise the grid, so the stored protocol is generated, never retyped.
+
+    A hand-kept copy drifts from the code within one commit; regenerating it is
+    what keeps the file in ``protocole/`` an honest description of what runs.
+    """
+    payload = [
+        {
+            "number": rubric.number,
+            "title": rubric.title,
+            "phase": rubric.phase.value,
+            "requires": sorted(c.name for c in rubric.requires),
+            "detail": rubric.detail,
+            "feeds_model": rubric.feeds_model,
+            "adapter": rubric.adapter,
+            "operator_import": rubric.operator_import,
+            "treatment": rubric.treatment,
+            "effect": rubric.effect,
+            "protocol_sections": list(rubric.protocol_sections),
+            "sub_requirements": list(rubric.sub_requirements),
+        }
+        for rubric in sorted(rubrics, key=lambda r: r.number)
+    ]
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
 def load_rubrics(path: str | Path) -> tuple[Rubric, ...]:
@@ -364,6 +457,12 @@ def load_rubrics(path: str | Path) -> tuple[Rubric, ...]:
                 operator_import=str(raw.get("operator_import", "")),
                 treatment=str(raw.get("treatment", "")),
                 effect=str(raw.get("effect", "")),
+                protocol_sections=tuple(
+                    str(item) for item in raw.get("protocol_sections", [])
+                ),
+                sub_requirements=tuple(
+                    str(item) for item in raw.get("sub_requirements", [])
+                ),
             )
         )
     return tuple(sorted(rubrics, key=lambda r: r.number))

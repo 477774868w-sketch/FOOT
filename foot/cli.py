@@ -422,11 +422,33 @@ def _build_registry(args: argparse.Namespace) -> Registry:
     ]
     results_csv = getattr(args, "resultats_csv", None)
     odds_csv = getattr(args, "cotes_csv", None)
-    if results_csv or odds_csv:
+    fixtures_csv = getattr(args, "calendrier_csv", None)
+    quoted = getattr(args, "cotes_relevees", None)
+    if results_csv or odds_csv or fixtures_csv:
         providers.append(
-            ManualProvider(results_csv=results_csv, odds_csv=odds_csv, label="import manuel")
+            ManualProvider(
+                results_csv=results_csv,
+                odds_csv=odds_csv,
+                fixtures_csv=fixtures_csv,
+                odds_quoted_at=_moment(quoted, args),
+                label="import manuel",
+            )
         )
     return Registry(providers)
+
+
+def _moment(text: str | None, args: argparse.Namespace) -> dt.datetime | None:
+    """Read an ISO instant in the run's timezone, or say precisely what is wrong."""
+    if not text:
+        return None
+    zone = resolve_timezone(getattr(args, "fuseau", None))
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError as error:
+        raise ValueError(
+            f"horodatage illisible : {text!r} (exemple valide : 2026-09-13T10:00)"
+        ) from error
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=zone)
 
 
 def _read_matches(args: argparse.Namespace) -> str:
@@ -631,7 +653,15 @@ def build_parser() -> argparse.ArgumentParser:
                            default=["2024-25", "2025-26", "2026-27"],
                            help="saisons chargées pour l'historique")
         group.add_argument("--resultats-csv", help="import manuel de résultats (CSV)")
+        group.add_argument(
+            "--calendrier-csv",
+            help="calendrier manuel des rencontres à venir : date,home,away[,neutre]",
+        )
         group.add_argument("--cotes-csv", help="import manuel de cotes (CSV)")
+        group.add_argument(
+            "--cotes-relevees",
+            help="heure de relevé des cotes importées (ISO, ex. 2026-09-13T10:00)",
+        )
         group.add_argument(
             "--protocole",
             help="fichier JSON des rubriques (défaut : protocole/protocole-22-rubriques.json)",

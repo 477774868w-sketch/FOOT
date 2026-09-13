@@ -21,6 +21,13 @@ from foot.collect.registry import Registry
 
 from support import assert_raises
 
+try:  # pytest is optional: the in-house runner has no marker concept.
+    import pytest
+
+    pytestmark = pytest.mark.network
+except ImportError:  # pragma: no cover - exercised only without pytest
+    pytestmark = None
+
 _SEASON = "2026-27"
 
 

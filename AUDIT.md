@@ -295,3 +295,123 @@ mypy .                     propre, 79 fichiers
 Les performances de §7.4 ont été **recalculées après ces corrections** et sont
 identiques au chiffre près : aucune des corrections de cette passe ne touche à
 l'estimation, elles portent sur la saisie, la traçabilité et la restitution.
+
+---
+
+## 8. Seconde revue indépendante du commit `6ee19c2` — corrections
+
+`tests/test_regression_review2.py` compte **34 tests**. Les 28 premiers ont été
+écrits avant toute correction : **27 échouaient** sur `6ee19c2`, le 28ᵉ
+(`test_d4e`) protégeait un comportement déjà correct. Les 6 suivants portent sur
+des défauts trouvés **en vérifiant** les corrections (§8.2) et sur la
+correspondance avec le protocole. Chacun exerce le **parcours utilisateur**, pas
+seulement la fonction interne.
+
+### 8.1 Défauts reproduits, puis corrigés
+
+| # | Défaut reproduit sur `6ee19c2` | Correction | Test |
+|---|---|---|---|
+| 1 | `ZeroDivisionError` dans `_documented_scenarios()` sur un import xG valide : un match sans but donnait un ratio nul, et **tout le lot** était perdu | `foot/analysis/xg.py` : le rapport buts/xG devient la moyenne a posteriori d'un modèle **Gamma-Poisson** conjugué, `(buts + k)/(xG + k)`. Finie pour toute entrée finie, elle tend vers le rapport brut quand l'échantillon grandit et vers 1 quand il est mince. L'incertitude a posteriori — pas un seuil arbitraire — décide si un écart mérite un scénario | `test_d1a–d` |
+| 2 | La coupure de disponibilité ne portait que sur l'estimation : les scénarios lisaient encore le résultat du jour (« 4 buts pour 1.00 xG ») | `SportInput` porte désormais les **suppléments filtrés** : estimation, constats, scénarios, contrôle des compositions et décision lisent tous la même entrée coupée. Trois dates distinguées — fait, publication, récupération ; sans heure de publication, l'antériorité dans la journée n'est pas démontrable et la ligne n'est réputée connue que le lendemain | `test_d2a–d` |
+| 3 | Une feuille du 1er août 2025 devenait « composition officielle » d'un match du 14 septembre 2026 ; `any(CONFIRMED)` étendait le statut d'une ligne à tout le relevé ; le gardien retenu pouvait être sur le banc | Une feuille est lue **par équipe et par rencontre** (`lineup_for`), garde son **propre** statut, et déclare sa **complétude** (11 titulaires). Une nouvelle feuille **remplace** la précédente, l'ancienne restant visible dans `superseded`. Les absences portent une fenêtre de validité (`jusqu_au`, `retour`, sinon 21 jours déclarés comme hypothèse) | `test_d3a–f` |
+| 4 | `ManualProvider.odds()` servait 3 prix, **0** atteignait le sélecteur ; 90 matchs importés donnaient **270** au dossier | Protocole `OddsSource` consulté **après le scellement** ; déduplication des matchs et des rencontres par `(date, domicile, extérieur)` ; `--calendrier-csv` et `--cotes-relevees` exposés par la CLI ; l'heure de relevé d'un prix importé n'est plus écrasée | `test_d4a–g` |
+| 5 | Une absence de gardien produisait exactement la même baisse de 15 % du rythme **offensif** qu'une absence de buteur (1.751745 → 1.488983 dans les deux cas) ; `gate_kinds` incluait SENSITIVITY contre ce qu'affirmait la doc | `foot/analysis/absence.py` : barème **par poste**, agissant sur le bon canal — un gardien absent fait monter l'attaque **adverse**, pas baisser la sienne — atténué de moitié si un remplaçant est nommé, borné en composition. Les trois rôles de scénario sont désormais séparés et nommés : **écarter** (événement documenté), **déclasser** (sensibilité), **informer** (incertitude d'estimation) | `test_d5a–e` |
+| 6 | `command_web()` n'offrait ni ne transmettait les imports xG, absences, compositions | `analyse_form()` est le **point d'entrée unique** du navigateur et des tests, appelant le même `engine.run()` que la CLI ; formulaire avec les trois zones de collage, lignes rejetées affichées pour correction, contexte réellement retenu affiché, mise en page téléphone | `test_d6a–d` |
+| 7 | La validation mesurait un ridge **fixe** tandis que le moteur en recommande un **adaptatif** : les chiffres publiés décrivaient une configuration que personne n'exécute | La variante « configuration de production » est ajoutée aux runs mesurés ; un test échoue si la constante et `EngineConfig.ridge_pseudo_matches` divergent | `test_d7a/b` |
+
+### 8.2 Défauts trouvés en vérifiant les corrections
+
+| Défaut | Détection | Correction | Test |
+|---|---|---|---|
+| Une rencontre absente du calendrier s'affichait « hors prématch », ce qui dit que le coup d'envoi est passé — l'opérateur était envoyé chercher une heure qui n'a jamais existé | parcours réel `Arsenal – Chelsea`, rejoué en CLI | état « non vérifiée » distinct, avec son propre compteur au récapitulatif | `test_d4f` |
+| Le risque principal annonçait « analyse de sensibilité » y compris quand le pire cas venait d'un **événement documenté** | lecture de la fiche produite sur données réelles | la ligne nomme le type dont vient le pire cas, et rapporte séparément la fragilité en sensibilité (qui déclasse, n'écarte pas) | vérifié au parcours §8.4 |
+| Une rubrique composite (R07 : buts, xG, npxG, xGA, tirs, grosses occasions, qualité des tirs) passait « traitée » sur un seul xG importé | lecture de la grille | `Rubric.sub_requirements` : la fiche nomme ce qui est couvert et ce qui manque ; l'état devient **partielle** | `test_d5e` |
+
+### 8.3 Correspondance avec le protocole original
+
+Le texte intégral fourni est stocké tel quel dans
+[`protocole/FOOT_Protocole_original_22_rubriques.md`](protocole/FOOT_Protocole_original_22_rubriques.md).
+
+Les numéros R01–R22 du moteur **ne sont pas** ceux du protocole : les constats
+portent des numéros codés en dur, les renuméroter les casserait silencieusement.
+La correspondance est donc déclarée par rubrique (`Rubric.protocol_sections`) et
+exportée dans le protocole généré. Les **21 sections méthodologiques** (§2 à §22)
+sont toutes rattachées à au moins une rubrique.
+
+### 8.4 Parcours réel vérifié
+
+Même lot de 3 rencontres, exécuté en CLI puis dans le navigateur, avec et sans
+imports (données openfootball réelles, `as_of` 13/09/2026 12:00) :
+
+```
+CLI 3 lignes restituées · navigateur 3 lignes restituées
+empreintes de dossier et décisions : IDENTIQUES sur les 3
+contexte retenu : 4 ligne(s) xG, 2 absence(s) · rejets : 0
+1  SSC Napoli – Bologna FC 1909   Victoire extérieur (2)  5.50  +27.4%  B  recommandé
+2  Arsenal FC – Chelsea FC        —                        —      —      —  non vérifiée
+3  Dijon – Sochaux                —                        —      —      —  équipe inconnue
+```
+
+Serveur réellement démarré et interrogé : `GET /` → 200 avec les trois zones de
+contexte ; `POST /` → 200 avec l'analyse, la ligne invalide signalée et les
+marchés comparés ; accès depuis une autre machine du réseau vérifié avec
+`--hote 0.0.0.0`.
+
+### 8.5 Performances, avec la configuration réellement recommandée
+
+Même campagne que §7.4 (Premier League, 790 matchs réels, 4 plis disjoints,
+486 rencontres hors échantillon), la variante de production incluse :
+
+```
+  réglé (régularisation)       RPS=0.21000   skill +8.35%
+  configuration de production  RPS=0.21024   skill +8.24%   ← celle qui recommande
+  référence                    RPS=0.21040   skill +8.17%
+  sans correction bas scores   RPS=0.21052   skill +8.12%
+  sans régularisation          RPS=0.21075   skill +8.02%
+  réglé (demi-vie)             RPS=0.21154   skill +7.67%
+  sans décroissance            RPS=0.21180   skill +7.56%
+  taux de base                 RPS=0.22912
+```
+
+**Lecture.** La configuration de production bat la référence à ridge fixe sans
+atteindre la meilleure variante. Les verdicts d'ablation sont inchangés : seul
+le modèle d'équipes confirme son apport (+0,01872, IC [+0,00830, +0,02921]) ;
+le réglage chronologique de la demi-vie dégrade (−0,00114, IC entièrement
+négatif). Aucun avantage de rentabilité n'est revendiqué : sans cotes relevées
+au moment de la décision, seule la qualité probabiliste est mesurée.
+
+### 8.6 Vérifications
+
+```
+pytest -m "not network"      267 réussis, 1 ignoré, 8 déselectionnés
+pytest -m "network"          8 réussis
+python3 tests/run_tests.py --sans-reseau
+                             267 réussi(s), 0 échec(s), 1 ignoré(s) sur 268
+ruff check .                 propre
+mypy .                       propre, 82 fichiers
+```
+
+L'ignoré est `test_r9_sample`, volontairement ignoré pour prouver que le
+compteur distingue bien « ignoré » de « réussi ».
+
+Contrôles GitHub Actions ajoutés dans
+[`.github/workflows/verification.yml`](.github/workflows/verification.yml) :
+un job **bloquant** (lanceur sans dépendance, pytest hors réseau, ruff, mypy,
+et vérification que le protocole stocké correspond au code) et un job **réseau
+informatif** (`continue-on-error`), parce qu'un hôte injoignable est un fait
+d'environnement et non un défaut du code.
+
+### 8.7 Ce qui reste à développer
+
+Ces points relèvent de la **seconde livraison** annoncée par la revue. Ils sont
+nommés ici comme reste-à-faire, pas comme fonctions :
+
+| Exigence du protocole | État réel |
+|---|---|
+| §7 cartons rouges, §21 xG à 11 contre 11 et selon l'état du score | **non développé** — exige des événements horodatés ; aucun adaptateur écrit, aucune entrée opérateur définie |
+| §10 entraîneur, changement de système ; §11 confrontation des styles | **non développé** — aucune source ni schéma d'import |
+| §21 coups de pied arrêtés, profondeur du banc | **non développé** |
+| §12 météo, pelouse, arbitre | **développé mais inaccessible** — `foot.collect.footballdata` écrit, hôte bloqué par la politique de sortie de cet environnement |
+| Barème d'impact par poste (`ROLE_IMPACTS`) | **hypothèse déclarée** — oriente le canal ; son apport prospectif n'est pas mesuré hors échantillon |
+| Régularisation du ratio buts/xG (`PSEUDO_GOALS = 4`) | **hypothèse déclarée** — non calibrée hors échantillon |
+| Mesure des décisions (rendements, évolution jusqu'à la clôture) | **non fait** — exige des prix relevés avant match et conservés ; aucun fournisseur de cotes n'est accessible ici |

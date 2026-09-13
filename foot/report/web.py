@@ -2,12 +2,18 @@
 
 No framework, no build step, no dependency: ``python3 -m foot web`` starts a
 local server and the whole journey — paste the matches, pick the date and
-timezone, add prices if you have them, read a card per match and one summary
-table — happens in the browser.
+timezone, add prices and context if you have them, read a card per match and one
+summary table — happens in the browser, including on a phone.
+
+Everything the command line can do is reachable here, and by the *same* route:
+:func:`analyse_form` is the single entry point, so the browser and the CLI
+cannot drift into giving different answers to the same question. The audited
+version had no context imports at all in the form — xG, absences and lineups
+were command-line-only — which meant the operator's own interface could not
+answer four of the twenty-two rubrics.
 
 The page is deliberately plain.  Its job is to make the analysis reachable, not
-to be admired, and every number it shows comes from the same engine the command
-line uses, so the two can never drift apart.
+to be admired.
 """
 
 from __future__ import annotations
@@ -17,15 +23,24 @@ import html
 import http.server
 import socketserver
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 
 from foot.analysis.engine import AnalysisRun, Engine
 from foot.analysis.request import DEFAULT_TIMEZONE, resolve_timezone
+from foot.collect.supplements import SupplementSet, supplements_from_text
 from foot.markets.portfolio import build_ticket, plan_stakes
 from foot.report.card import render_card, render_rubric_grid
 from foot.report.table import render_summary
 
-__all__ = ["build_page", "serve"]
+__all__ = [
+    "FormResult",
+    "analyse_form",
+    "build_page",
+    "render_form",
+    "render_result",
+    "serve",
+]
 
 _STYLE = """
 :root { color-scheme: light dark; --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66;
@@ -50,6 +65,14 @@ textarea, input, select { width:100%; padding:9px 11px; border:1px solid var(--l
 textarea { min-height:130px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 .row { display:flex; gap:14px; flex-wrap:wrap; }
 .row > div { flex:1 1 200px; min-width:0; }
+textarea.small { min-height:88px; }
+details.ctx { margin-top:18px; border:1px solid var(--line); border-radius:8px;
+              padding:10px 14px; }
+ul.rejets { margin:8px 0 0; padding-left:20px; font-size:0.86rem; }
+@media (max-width:560px) {
+  .row { gap:0; }
+  button { width:100%; }
+}
 button { margin-top:18px; padding:11px 26px; border:0; border-radius:7px;
          background:var(--accent); color:#fff; font-size:0.97rem; font-weight:600;
          cursor:pointer; }
@@ -73,7 +96,11 @@ _FORM = """
   <p class="hint">Formats acceptés&nbsp;: <code>Arsenal - Chelsea</code> ·
     <code>Premier League: Man Utd vs Liverpool 20/09/2026 17:30</code> ·
     <code>it.1 | Inter - Milan | 20/09/2026 20:45 | 1.95 3.50 4.20</code>
-    (les trois cotes sont 1&nbsp;/&nbsp;N&nbsp;/&nbsp;2).</p>
+    (les trois cotes sont 1&nbsp;/&nbsp;N&nbsp;/&nbsp;2).<br>
+    Autres marchés, dans la même ligne&nbsp;: <code>1=</code> <code>N=</code>
+    <code>2=</code> <code>DC:1N=</code> <code>DNB:1=</code>
+    <code>TOTAL:+2.5=</code> <code>AH:H:-0.5=</code> <code>TE:H:+1.5=</code>
+    <code>BTTS:oui=</code> — un marché sans prix ne peut pas être comparé.</p>
   <div class="row">
     <div>
       <label for="date">Date et heure de l'analyse (as_of)</label>
@@ -104,9 +131,42 @@ _FORM = """
       </select>
     </div>
   </div>
+  <details class="ctx"{ctx_open}>
+    <summary>Contexte à fournir — xG, absences, compositions (facultatif)</summary>
+    <p class="hint">Aucune source accessible ne publie ces données ici. Collez-les
+      et les rubriques correspondantes passent de « non renseignée » à
+      « traitée ». Une ligne illisible est affichée pour correction, jamais
+      devinée. Sans heure de publication, une ligne du jour n'est réputée
+      connue que le lendemain.</p>
+    <label for="xg">xG — <code>date,home,away,home_xg,away_xg</code>
+      puis au choix <code>source,statut,publication</code></label>
+    <textarea id="xg" name="xg" class="small"
+      placeholder="{xg_ph}">{xg}</textarea>
+    <label for="absences">Absences — <code>date,equipe,joueur</code> puis au choix
+      <code>poste,motif,source,statut,remplacant,jusqu_au,retour</code></label>
+    <textarea id="absences" name="absences" class="small"
+      placeholder="{abs_ph}">{absences}</textarea>
+    <label for="compositions">Compositions — <code>date,equipe,joueur</code> puis au
+      choix <code>poste,titulaire,source,statut,publication</code></label>
+    <textarea id="compositions" name="compositions" class="small"
+      placeholder="{compo_ph}">{compositions}</textarea>
+  </details>
   <button type="submit">Analyser</button>
 </form>
 """
+
+_XG_PLACEHOLDER = (
+    "date,home,away,home_xg,away_xg,source,statut\n"
+    "30/08/2026,SSC Napoli,Como 1907,2.31,0.74,Opta,probable"
+)
+_ABSENCE_PLACEHOLDER = (
+    "date,equipe,joueur,poste,motif,source,statut,remplacant\n"
+    "12/09/2026,SSC Napoli,Alex Meret,gardien,blessure,club,officiel,Caprile"
+)
+_LINEUP_PLACEHOLDER = (
+    "date,equipe,joueur,poste,titulaire,source,statut,publication\n"
+    "13/09/2026,SSC Napoli,Milinkovic-Savic,gardien,oui,club,officiel,13/09/2026 19:30"
+)
 
 _PLACEHOLDER = (
     "Premier League: Manchester United - Manchester City 14/09/2026 17:30 @ 2.55 3.55 2.65\n"
@@ -128,7 +188,7 @@ def _zone_options(selected: str) -> str:
     )
 
 
-def build_page(
+def render_form(
     *,
     matchs: str = "",
     date: str = "",
@@ -136,10 +196,11 @@ def build_page(
     bookmaker: str = "",
     budget: str = "",
     combine: str = "non",
-    body: str = "",
+    context: Mapping[str, str] | None = None,
 ) -> str:
-    """Render the whole single-page interface."""
-    form = _FORM.format(
+    """Render the input form alone — the whole operator surface in one place."""
+    pasted = dict(context or {})
+    return _FORM.format(
         matchs=html.escape(matchs),
         placeholder=html.escape(_PLACEHOLDER),
         date=html.escape(date),
@@ -148,6 +209,31 @@ def build_page(
         budget=html.escape(budget),
         c_non=" selected" if combine != "oui" else "",
         c_oui=" selected" if combine == "oui" else "",
+        xg=html.escape(pasted.get("xg", "")),
+        absences=html.escape(pasted.get("absences", "")),
+        compositions=html.escape(pasted.get("compositions", "")),
+        xg_ph=html.escape(_XG_PLACEHOLDER),
+        abs_ph=html.escape(_ABSENCE_PLACEHOLDER),
+        compo_ph=html.escape(_LINEUP_PLACEHOLDER),
+        ctx_open=" open" if any(pasted.values()) else "",
+    )
+
+
+def build_page(
+    *,
+    matchs: str = "",
+    date: str = "",
+    timezone: str = DEFAULT_TIMEZONE,
+    bookmaker: str = "",
+    budget: str = "",
+    combine: str = "non",
+    context: Mapping[str, str] | None = None,
+    body: str = "",
+) -> str:
+    """Render the whole single-page interface."""
+    form = render_form(
+        matchs=matchs, date=date, timezone=timezone, bookmaker=bookmaker,
+        budget=budget, combine=combine, context=context,
     )
     return f"""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8">
@@ -160,6 +246,59 @@ comparaison des marchés disponibles · une décision par rencontre.</p>
 {form}
 {body}
 </div></body></html>"""
+
+
+@dataclass(frozen=True, slots=True)
+class FormResult:
+    """One submitted form, analysed — with what was refused and what was kept."""
+
+    run: AnalysisRun
+    rejected: tuple[str, ...] = ()
+    """Pasted lines the loaders refused, each with its reason."""
+
+    used: tuple[str, ...] = field(default_factory=tuple)
+    """What the context imports actually contributed, counted."""
+
+
+def analyse_form(
+    engine: Engine,
+    *,
+    matches: str,
+    as_of: dt.datetime,
+    timezone: str = DEFAULT_TIMEZONE,
+    bookmaker: str | None = None,
+    pasted: Mapping[str, str] | None = None,
+    supplements: SupplementSet | None = None,
+) -> FormResult:
+    """Run one submitted form through the very same engine call the CLI makes.
+
+    Keeping a single function for both surfaces is what makes "the browser and
+    the command line agree" a property rather than a hope: there is only one
+    code path, so there is nothing to keep in sync.
+    """
+    blocks = dict(pasted or {})
+    context = supplements or supplements_from_text(
+        xg=blocks.get("xg", ""),
+        absences=blocks.get("absences", ""),
+        lineups=blocks.get("compositions", ""),
+        tzinfo=resolve_timezone(timezone),
+    )
+    run = engine.run(
+        matches,
+        as_of=as_of,
+        timezone=timezone,
+        bookmaker=bookmaker,
+        quoted_at=as_of,
+        supplements=context,
+    )
+    used: list[str] = []
+    if context.xg:
+        used.append(f"{len(context.xg)} ligne(s) xG")
+    if context.absences:
+        used.append(f"{len(context.absences)} absence(s)")
+    if context.lineups:
+        used.append(f"{len(context.lineups)} ligne(s) de composition")
+    return FormResult(run=run, rejected=context.rejected, used=tuple(used))
 
 
 def _escape_block(title: str, text: str) -> str:
@@ -206,6 +345,27 @@ def render_run(run: AnalysisRun, *, budget: float | None, combine: bool) -> str:
     return "\n".join(parts)
 
 
+def render_result(result: FormResult, *, budget: float | None, combine: bool) -> str:
+    """The page body: what was refused, what was kept, then the analysis itself."""
+    parts: list[str] = []
+    if result.rejected:
+        parts.append(
+            '<div class="note"><strong>Lignes non retenues</strong> — corrigez-les '
+            "et relancez&nbsp;; rien n'a été deviné à leur place&nbsp;:<ul "
+            'class="rejets">'
+            + "".join(f"<li>{html.escape(line)}</li>" for line in result.rejected)
+            + "</ul></div>"
+        )
+    if result.used:
+        parts.append(
+            '<div class="note">Contexte réellement retenu&nbsp;: '
+            + html.escape(", ".join(result.used))
+            + ". Ce qui n'apparaît pas ici n'a pas servi à l'analyse.</div>"
+        )
+    parts.append(render_run(result.run, budget=budget, combine=combine))
+    return "\n".join(parts)
+
+
 def make_handler(engine: Engine) -> type[http.server.BaseHTTPRequestHandler]:
     """Build a request handler bound to one engine instance."""
 
@@ -240,6 +400,12 @@ def make_handler(engine: Engine) -> type[http.server.BaseHTTPRequestHandler]:
             budget_text = form.get("budget", [""])[0]
             combine = form.get("combine", ["non"])[0] == "oui"
 
+            context = {
+                "xg": form.get("xg", [""])[0],
+                "absences": form.get("absences", [""])[0],
+                "compositions": form.get("compositions", [""])[0],
+            }
+
             body = ""
             try:
                 zone_info = resolve_timezone(zone)
@@ -250,11 +416,15 @@ def make_handler(engine: Engine) -> type[http.server.BaseHTTPRequestHandler]:
                 )
                 budget = float(budget_text) if budget_text.strip() else None
                 if matchs.strip():
-                    run = engine.run(
-                        matchs, as_of=as_of, timezone=zone,
-                        bookmaker=bookmaker or None, quoted_at=as_of,
+                    result = analyse_form(
+                        engine,
+                        matches=matchs,
+                        as_of=as_of,
+                        timezone=zone,
+                        bookmaker=bookmaker or None,
+                        pasted=context,
                     )
-                    body = render_run(run, budget=budget, combine=combine)
+                    body = render_result(result, budget=budget, combine=combine)
                 else:
                     body = '<div class="note">Saisissez au moins une rencontre.</div>'
             except (ValueError, KeyError) as error:
@@ -263,7 +433,8 @@ def make_handler(engine: Engine) -> type[http.server.BaseHTTPRequestHandler]:
             self._send(
                 build_page(
                     matchs=matchs, date=date_text, timezone=zone, bookmaker=bookmaker,
-                    budget=budget_text, combine="oui" if combine else "non", body=body,
+                    budget=budget_text, combine="oui" if combine else "non",
+                    context=context, body=body,
                 )
             )
 

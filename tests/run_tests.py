@@ -78,22 +78,35 @@ def load(path: Path) -> ModuleType:
     return module
 
 
+NETWORK_MODULES = ("test_live_sources",)
+"""Modules that reach a remote host. Excluded by ``--sans-reseau``.
+
+Kept as a name list rather than a pytest marker so the dependency-free runner
+can honour the same separation CI uses: the deterministic suite must be able to
+run, and fail, without any network at all.
+"""
+
+
 def run_suite(
     directory: Path,
     *,
     patterns: list[str] | None = None,
     verbose: bool = False,
     echo: bool = False,
+    skip_network: bool = False,
 ) -> Summary:
     """Run every discovered test, returning the three counts.
 
     Args:
         patterns: substrings matched against ``module::function`` labels.
         echo: print progress dots as the run proceeds.
+        skip_network: leave out the modules listed in :data:`NETWORK_MODULES`.
     """
     summary = Summary()
     started = time.time()
     for path in sorted(directory.glob("test_*.py")):
+        if skip_network and path.stem in NETWORK_MODULES:
+            continue
         module = load(path)
         for name in sorted(dir(module)):
             if not name.startswith("test_"):
@@ -127,11 +140,16 @@ def run_suite(
 
 def main(argv: list[str]) -> int:
     verbose = "-v" in argv
+    skip_network = "--sans-reseau" in argv
     patterns = [a for a in argv if not a.startswith("-")]
     sys.path.insert(0, str(ROOT))
     sys.path.insert(0, str(TESTS))
     summary = run_suite(
-        TESTS, patterns=patterns or None, verbose=verbose, echo=True
+        TESTS,
+        patterns=patterns or None,
+        verbose=verbose,
+        echo=True,
+        skip_network=skip_network,
     )
     print()
     print(summary.render())

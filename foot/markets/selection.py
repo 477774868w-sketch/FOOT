@@ -132,19 +132,38 @@ class RankingCriteria:
     """Common stake at which every market's log growth is compared."""
 
     exclude_families: frozenset[MarketFamily] = frozenset()
-    gate_kinds: frozenset[ScenarioKind] = frozenset(
-        {ScenarioKind.SENSITIVITY, ScenarioKind.SPORTING_EVENT}
-    )
-    """Scenario kinds allowed to *reject* a bet.
+    gate_kinds: frozenset[ScenarioKind] = frozenset({ScenarioKind.SPORTING_EVENT})
+    """Scenario kinds allowed to **reject** a bet outright.
 
-    Estimation noise is deliberately excluded: it is a two-sided band around the
-    estimate, not an adverse event, and using it as a floor would reject every
-    market on any realistic sample while pretending the rejection was about
-    football.  It is measured and reported instead — see
-    :attr:`ScoredOffer.uncertainty_range`.
+    Only a documented sporting event qualifies, and the three roles are kept
+    strictly apart — the audited version silently let an arbitrary ±15 % shift
+    reject a bet while the guide claimed the opposite:
+
+    ``gate_kinds`` — **filtrent.**
+        A sourced fact (a reported absence, a measured xG gap) may take a market
+        below the worst-case floor and remove it from consideration.
+    ``ranking_kinds`` — **déclassent.**
+        A deliberate sensitivity shift never rejects anything: it is arbitrary.
+        It penalises the ranking, so a fragile market loses to a robust one at
+        equal value, and it lowers confidence.
+    everything else — **informe.**
+        Estimation noise is a two-sided band around the estimate, not an adverse
+        event.  Using it as a floor would reject every market on any realistic
+        sample while pretending the rejection was about football. It is measured
+        and reported — see :attr:`ScoredOffer.uncertainty_range`.
     """
 
-    version: str = "criteres-v2"
+    ranking_kinds: frozenset[ScenarioKind] = frozenset({ScenarioKind.SENSITIVITY})
+    """Scenario kinds that move a market down the ranking without rejecting it."""
+
+    fragility_weight: float = 0.5
+    """How much of a sensitivity loss is charged against the ranking score.
+
+    Hypothesis, declared: half the shortfall below the central estimate. It
+    orders markets, it never removes one.
+    """
+
+    version: str = "criteres-v3"
     declared_at: dt.datetime = field(default_factory=utcnow)
 
     def describe(self) -> str:
@@ -155,7 +174,12 @@ class RankingCriteria:
             f"EV pire scénario ≥ {self.min_worst_case_value:+.1%}, "
             f"p ≥ {self.min_win_probability:.0%}, "
             f"cote de moins de {self.max_stale_hours:g} h, "
-            f"classement par croissance logarithmique à {self.reference_stake:.0%} de mise."
+            f"classement par croissance logarithmique à {self.reference_stake:.0%} "
+            f"de mise, minorée de {self.fragility_weight:.0%} de la perte en "
+            f"sensibilité.\n"
+            f"  Rôle des scénarios : seul un ÉVÉNEMENT SPORTIF DOCUMENTÉ peut "
+            f"écarter un marché ; la SENSIBILITÉ déclasse sans écarter ; "
+            f"l'INCERTITUDE D'ESTIMATION est rapportée sans agir."
         )
 
 
@@ -171,6 +195,13 @@ class ScoredOffer:
     """Expected value under ±1 σ of estimation noise — reported, never a filter."""
 
     log_growth: float | None = None
+    rank_score: float | None = None
+    """Log growth minus the fragility charge — what actually orders the list."""
+
+    fragility: float = 0.0
+    """How much expected value a deliberate sensitivity shift costs this market."""
+
+    fragility_scenario: str = ""
     passed: bool = False
     rejection: str = ""
 
@@ -343,18 +374,31 @@ def select_best(
         worst, worst_name = value, "estimation centrale"
         worst_kind: ScenarioKind | None = None
         band: list[float] = []
+        fragile, fragile_name = value, "estimation centrale"
         for scenario in scenarios:
             stressed = price_offer(item.offer, scenario.matrix)
             candidate = stressed.expected_value(item.offer.odds)
             if scenario.kind is ScenarioKind.MODEL_UNCERTAINTY:
                 band.append(candidate)
                 continue
+            if scenario.kind in criteria.ranking_kinds and (
+                fragile is None or candidate < fragile
+            ):
+                fragile, fragile_name = candidate, scenario.name
             if scenario.kind not in criteria.gate_kinds:
                 continue
             if worst is None or candidate < worst:
                 worst, worst_name, worst_kind = candidate, scenario.name, scenario.kind
         uncertainty = (min(band), max(band)) if band else None
         growth = item.log_growth(criteria.reference_stake)
+        # Fragility orders, it does not reject: a market that loses more under a
+        # deliberate shift ranks below an equally priced one that holds.
+        shortfall = 0.0
+        if value is not None and fragile is not None and fragile < value:
+            shortfall = value - fragile
+        rank_score = (
+            None if growth is None else growth - criteria.fragility_weight * shortfall
+        )
 
         rejection = ""
         if item.offer.family in criteria.exclude_families:
@@ -366,7 +410,10 @@ def select_best(
         elif value is None or value < criteria.min_expected_value:
             rejection = f"EV {0.0 if value is None else value:+.2%} sous le seuil"
         elif worst is not None and worst < criteria.min_worst_case_value:
-            rejection = f"fragile : {worst:+.2%} en sensibilité « {worst_name} »"
+            rejection = (
+                f"écarté par un fait documenté : {worst:+.2%} sous le scénario "
+                f"« {worst_name} »"
+            )
         elif item.win_probability < criteria.min_win_probability:
             rejection = f"probabilité {item.win_probability:.1%} sous le plancher"
 
@@ -378,6 +425,9 @@ def select_best(
                 worst_case_kind=worst_kind,
                 uncertainty_range=uncertainty,
                 log_growth=growth,
+                rank_score=rank_score,
+                fragility=shortfall,
+                fragility_scenario=fragile_name,
                 passed=not rejection,
                 rejection=rejection,
             )
@@ -409,7 +459,9 @@ def select_best(
             compared=tuple(s.offer.label for s in scored),
         )
 
-    survivors.sort(key=lambda s: -(s.log_growth if s.log_growth is not None else -math.inf))
+    survivors.sort(
+        key=lambda s: -(s.rank_score if s.rank_score is not None else -math.inf)
+    )
     best, others = survivors[0], survivors[1:]
     confidence = _confidence_for(
         best,
@@ -463,7 +515,16 @@ def select_best(
         confidence=confidence,
         rationale=_dominance(best, others),
         main_risk=(
-            f"espérance la plus basse en analyse de sensibilité : {worst_text}"
+            # The line must name the kind it actually came from: calling a
+            # documented absence a "sensitivity shift" understates it, and
+            # calling an arbitrary ±15 % a documented event overstates it.
+            f"espérance la plus basse sous scénario écartant : {worst_text}"
+            + (
+                f" · fragilité en sensibilité « {best.fragility_scenario} » : "
+                f"−{best.fragility:.2%} d'espérance (déclasse, n'écarte pas)"
+                if best.fragility > 0.0
+                else ""
+            )
             + (
                 f" · incertitude d'estimation : "
                 f"[{best.uncertainty_range[0]:+.2%}, {best.uncertainty_range[1]:+.2%}]"

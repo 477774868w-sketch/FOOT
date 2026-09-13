@@ -30,6 +30,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 
+from foot.collect.supplements import SupplementSet
 from foot.domain import Fixture, MatchLog, OutcomeProbabilities
 from foot.models.base import ScoreMatrix
 from foot.provenance import Evidence, fingerprint, utcnow
@@ -193,6 +194,14 @@ class SportInput:
 
     cutoff_rule: str = ""
     """How that cutoff was derived, carried into the report."""
+
+    supplements: SupplementSet = field(default_factory=SupplementSet)
+    """Operator context, **already cut on availability**.
+
+    Carrying it here rather than alongside is what makes the cut binding: the
+    estimate, the findings, the scenarios, the lineup check and the decision all
+    read this one object, so none of them can quietly see more than the others.
+    """
 
     def __post_init__(self) -> None:
         if self.as_of.tzinfo is None:
@@ -399,6 +408,7 @@ def build_sport_input(
     *,
     competition: str = "",
     result_delay: dt.timedelta = DEFAULT_RESULT_DELAY,
+    supplements: SupplementSet | None = None,
 ) -> SportInput:
     """Construct the sport phase's input, cut on **information availability**.
 
@@ -418,6 +428,7 @@ def build_sport_input(
         as_of=as_of,
         evidence=tuple(evidence),
         competition=competition,
+        supplements=(supplements or SupplementSet()).available_at(as_of),
         knowledge_cutoff=as_of,
         cutoff_rule=(
             f"date de disponibilité = date du match + {result_delay.days} j "

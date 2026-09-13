@@ -32,6 +32,9 @@ foot = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+markers = [
+  "network: touche un hôte distant ; exclure avec -m 'not network'",
+]
 
 [tool.ruff]
 line-length = 100
@@ -55,3 +58,10 @@ python_version = "3.10"
 strict = true
 warn_unreachable = true
 disallow_any_explicit = false
+
+# pytest est une commodité, pas une dépendance : la suite tourne sans lui via
+# `python3 tests/run_tests.py`. Son absence de stubs ne doit donc pas faire
+# échouer la vérification de types du projet.
+[[tool.mypy.overrides]]
+module = "pytest"
+ignore_missing_imports = true

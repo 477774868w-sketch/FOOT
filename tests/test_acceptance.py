@@ -361,16 +361,21 @@ def test_an_official_lineup_supersedes_a_probable_one_and_revises_the_dossier() 
     sealed = analysis.sealed
     assert plan is not None and sealed is not None
 
-    probable = LineupObservation(utcnow(), Confidence.PROBABLE, "presse", goalkeeper="Martin")
+    probable = LineupObservation(
+        utcnow(), Confidence.PROBABLE, "presse", team="Club A", goalkeeper="Martin",
+    )
     plan.record(probable, impact=LineupImpact.MAINTAINED, reason="conforme aux attentes")
     assert [o.official for o in plan.observations] == [False]
 
     official = LineupObservation(
-        utcnow(), Confidence.CONFIRMED, "club (officiel)", goalkeeper="Doublure",
-        absences=("titulaire",),
+        utcnow(), Confidence.CONFIRMED, "club (officiel)", team="Club A",
+        goalkeeper="Doublure", absences=("titulaire",),
     )
     plan.record(official, impact=LineupImpact.DEGRADED, reason="gardien titulaire absent")
-    assert [o.official for o in plan.observations] == [False, True]
+    # The official sheet *replaces* the probable one: a plan holding both could
+    # not answer "who is playing". The replaced version stays visible.
+    assert [o.official for o in plan.observations] == [True]
+    assert [o.official for o in plan.superseded] == [False]
     assert plan.has_official
     recorded = plan.impact
     assert recorded is LineupImpact.DEGRADED

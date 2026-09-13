@@ -9,6 +9,7 @@ census line at the bottom reconciles the count against what was typed.
 from __future__ import annotations
 
 from foot.analysis.engine import AnalysisRun
+from foot.analysis.request import KickoffStatus
 from foot.markets.selection import DecisionStatus
 
 __all__ = ["render_summary"]
@@ -68,7 +69,17 @@ def render_summary(run: AnalysisRun) -> str:
             elif decision.status is DecisionStatus.PRICE_CONDITION:
                 pick = "angle sportif, cote requise"
         elif analysis.blocked_reason:
-            verdict = "hors prématch" if not resolved.bettable else "bloqué"
+            # "hors prématch" would say the match has started; an unverified
+            # fixture has not — it is simply not in the calendar we loaded, and
+            # sending the operator to look for a kick-off that already happened
+            # is the wrong instruction.
+            verdict = (
+                "non vérifiée"
+                if resolved.kickoff_status is KickoffStatus.UNVERIFIED
+                else "hors prématch"
+                if not resolved.bettable
+                else "bloqué"
+            )
 
         lines.append(_row([number, label, pick, odds, probability, value, confidence, verdict]))
 
@@ -77,6 +88,7 @@ def render_summary(run: AnalysisRun) -> str:
         f"Total : {run.requested} demandée(s) · {len(run.analysed())} analysée(s) · "
         f"{len(run.recommendations())} recommandation(s) · "
         f"{len(run.unresolved())} à préciser · "
+        f"{len(run.unverified_matches())} non vérifiée(s) · "
         f"{len(run.started_matches())} hors prématch"
     )
     if run.requested != len(run.analyses):  # pragma: no cover - invariant

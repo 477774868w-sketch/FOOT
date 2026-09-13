@@ -22,6 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from foot.analysis.absence import combined_impact, describe_absences
 from foot.analysis.dossier import (
     ExposureAudit,
     Finding,
@@ -54,10 +55,11 @@ from foot.analysis.rubrics import (
     RubricStatus,
     load_rubrics,
 )
-from foot.collect.base import Capability, SeasonData, SeasonSource
+from foot.analysis.xg import XgBalance
+from foot.collect.base import Capability, OddsSource, SeasonData, SeasonSource
 from foot.collect.openfootball import COMPETITIONS, resolve_competition
 from foot.collect.registry import Registry, RegistryReport
-from foot.collect.supplements import SupplementSet
+from foot.collect.supplements import FULL_LINEUP, SupplementSet
 from foot.data.synthetic import SYNTHETIC_MARKER
 from foot.domain import Fixture, Match, MatchLog, Outcome
 from foot.markets.catalogue import standard_catalogue
@@ -185,9 +187,23 @@ class AnalysisRun:
         return tuple(a for a in self.analyses if not a.resolved.analysable)
 
     def started_matches(self) -> tuple[MatchAnalysis, ...]:
+        """Matches whose kick-off has passed — genuinely out of pre-match."""
         return tuple(
             a for a in self.analyses
-            if a.resolved.analysable and not a.resolved.bettable
+            if a.resolved.analysable
+            and not a.resolved.bettable
+            and a.resolved.kickoff_status is not KickoffStatus.UNVERIFIED
+        )
+
+    def unverified_matches(self) -> tuple[MatchAnalysis, ...]:
+        """Matches absent from the loaded calendar — a different problem entirely.
+
+        Counting them as "started" told the operator to look for a kick-off that
+        never happened, instead of telling them the fixture could not be found.
+        """
+        return tuple(
+            a for a in self.analyses
+            if a.resolved.kickoff_status is KickoffStatus.UNVERIFIED
         )
 
     def recommendations(self) -> tuple[MatchAnalysis, ...]:
@@ -200,8 +216,10 @@ class Engine:
     __slots__ = (
         "_config",
         "_criteria",
+        "_duplicates",
         "_evidence",
         "_labels",
+        "_price_sources",
         "_providers",
         "_registry",
         "_rubrics",
@@ -234,6 +252,15 @@ class Engine:
         )
         self._used: dict[str, str] = {}
         self._evidence: dict[str, list[Evidence]] = {}
+        self._duplicates: dict[str, int] = {}
+        # Providers able to quote prices, kept apart from the result sources:
+        # they are consulted only *after* the sport dossier is sealed.
+        self._price_sources: tuple[OddsSource, ...] = tuple(
+            provider
+            for provider in registry
+            if isinstance(provider, OddsSource)
+            and Capability.ODDS in provider.capabilities
+        )
         self._rubrics = _load_grid(self._config.rubrics_path)
 
     @property
@@ -343,6 +370,13 @@ class Engine:
             upcoming: list[Fixture] = []
             names: set[str] = set()
             label = ""
+            # A match is identified by ``(date, home, away)``, not by the season
+            # file it came from.  A provider that ignores the season argument —
+            # a manual import serves the same file for every season asked —
+            # would otherwise have its 90 matches counted three times, silently
+            # tripling every rate the model estimates.
+            seen: set[tuple[dt.date, str, str]] = set()
+            seen_fixtures: set[tuple[dt.date, str, str]] = set()
             for provider in self._providers:
                 if key not in provider.competitions():
                     continue
@@ -351,15 +385,29 @@ class Engine:
                         data = provider.season(key, season)
                     except Exception:
                         continue
-                    matches.extend(data.played)
+                    fresh = 0
+                    for match in data.played:
+                        identity = (match.date, match.home, match.away)
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
+                        matches.append(match)
+                        fresh += 1
                     names.update(data.teams)
                     label = data.label or label
                     self._used[key] = provider.name
+                    self._duplicates[key] = self._duplicates.get(key, 0) + (
+                        len(data.played) - fresh
+                    )
                     self._evidence.setdefault(key, []).extend(
                         _dataset_evidence(provider, data)
                     )
-                    if season == self._config.seasons[-1]:
-                        upcoming.extend(data.fixtures)
+                    for fixture in data.fixtures:
+                        identity = (fixture.date, fixture.home, fixture.away)
+                        if identity in seen_fixtures:
+                            continue
+                        seen_fixtures.add(identity)
+                        upcoming.append(fixture)
                 if names:
                     break  # the first provider that actually delivered wins
             if names:
@@ -595,41 +643,49 @@ class Engine:
             if _mentions(item, fixture) and item.fact_date is not None
             and item.fact_date <= as_of.date()
         )
+        # One input, cut once. Everything downstream — estimate, findings,
+        # scenarios, lineup check, decision — reads `sport_input`, never the
+        # raw history or the raw supplements, so none of them can see further
+        # back than the others.
         sport_input = build_sport_input(
             fixture,
             history,
             as_of,
             evidence,
             competition=resolved.competition_label,
+            supplements=extra,
         )
+        known_history = sport_input.history
+        known_extra = sport_input.supplements
         # The T−75/T−60 plan is sporting information, so it is built *before*
         # the seal and fed the sheets the operator actually imported: a report
         # must never show an official lineup in one section and "no lineup
         # recorded" in another.
         plan = plan_lineup_checks(resolved, as_of)
         record_supplied_lineups(
-            plan,
-            sheets=[
-                *extra.lineups_for(fixture.home, on_or_before=fixture.date),
-                *extra.lineups_for(fixture.away, on_or_before=fixture.date),
-            ],
-            absences=[
-                *extra.absences_for(fixture.home, on_or_before=fixture.date),
-                *extra.absences_for(fixture.away, on_or_before=fixture.date),
-            ],
-            observed_at=as_of,
+            plan, fixture=fixture, supplements=known_extra, as_of=as_of
         )
-        dossier = self._build_dossier(sport_input, ledger, extra, resolved, plan)
+        dossier = self._build_dossier(sport_input, ledger, known_extra, resolved, plan)
         sealed = dossier.seal()
         audit.sealed(sealed.sealed_at)
 
         # ---- Market phase: prices become visible only now ----------------
         matrix = sealed.score_matrix
-        scenarios = self._scenarios(dossier, history, extra)
+        scenarios = self._scenarios(dossier, known_history, known_extra)
         prices: dict[str, float] = dict(quotes or {})
         if odds is not None:
             for outcome, price in zip(Outcome, odds, strict=True):
                 prices.setdefault(f"1X2:{outcome.value}", price)
+        # Prices a provider can quote are collected **here**, after the seal,
+        # never during loading: an imported odds file that never reaches the
+        # selector is an option that exists only in the help text.
+        imported, imported_at, imported_book = self._provider_prices(fixture)
+        for key, price in imported.items():
+            prices.setdefault(key, price)
+        if imported_book:
+            bookmaker = bookmaker or imported_book
+        if imported and quoted_at is None:
+            quoted_at = imported_at
         if prices:
             audit.saw_odds(f"{len(prices)} cote(s) fournies par l'opérateur")
             ledger.extend(
@@ -654,10 +710,10 @@ class Engine:
         market_findings = _market_findings(priced, prices, scenarios)
         assessments = self._assess_rubrics(
             report,
-            history,
+            known_history,
             fixture,
             [*dossier.findings, *market_findings],
-            extra,
+            known_extra,
         )
         decision = select_best(
             priced,
@@ -684,6 +740,48 @@ class Engine:
             ledger=ledger,
             scenarios=tuple(scenarios),
         )
+
+    def _provider_prices(
+        self, fixture: Fixture
+    ) -> tuple[dict[str, float], dt.datetime | None, str]:
+        """1–N–2 prices a registered source quotes for this fixture.
+
+        Consulted only after the dossier is sealed, so a price source cannot
+        colour the sporting read.  A source that fails is skipped, not fatal:
+        an unreachable bookmaker costs a comparison, never the analysis.
+        """
+        for source in self._price_sources:
+            try:
+                book, _evidence = source.odds()
+            except Exception:
+                continue
+            quote = book.get(fixture)
+            if quote is None:
+                quote = next(
+                    (
+                        value
+                        for key, value in book.items()
+                        if (key.date, key.home, key.away)
+                        == (fixture.date, fixture.home, fixture.away)
+                    ),
+                    None,
+                )
+            if quote is None:
+                continue
+            moment: dt.datetime | None = None
+            getter = getattr(source, "quoted_at", None)
+            if callable(getter):
+                moment = getter()
+            return (
+                {
+                    "1X2:H": quote.home,
+                    "1X2:D": quote.draw,
+                    "1X2:A": quote.away,
+                },
+                moment,
+                source.name,
+            )
+        return ({}, None, "")
 
     # -- Sport dossier -----------------------------------------------------
     def _build_dossier(
@@ -942,11 +1040,18 @@ class Engine:
                 else f"{len(history)} matchs de {fixture.competition or 'la compétition'}"
             )
             effects = [f.effect for f in covered if f.effect]
+            satisfied = _satisfied_requirements(
+                rubric, supplements or SupplementSet(), bool(covered)
+            )
+            complete = not rubric.sub_requirements or len(satisfied) == len(
+                rubric.sub_requirements
+            )
             assessments.append(
                 RubricAssessment(
                     rubric=rubric,
+                    satisfied=satisfied,
                     status=RubricStatus.COVERED
-                    if covered or not rubric.requires
+                    if (covered or not rubric.requires) and complete
                     else RubricStatus.PARTIAL,
                     summary=_rubric_summary(rubric, history, fixture, covered),
                     implementation=implementation,
@@ -1061,7 +1166,6 @@ class Engine:
                 history,
                 supplements or SupplementSet(),
                 build,
-                self._config.scenario_shift,
             )
         )
         return scenarios
@@ -1094,29 +1198,9 @@ def _mentions(item: Evidence, fixture: Fixture) -> bool:
     return fixture.home in item.key or fixture.away in item.key
 
 
-@dataclass(frozen=True, slots=True)
-class _XgBalance:
-    """Goals actually scored against expected goals, over the same matches."""
-
-    team: str
-    matches: int
-    goals: float
-    expected: float
-    keys: tuple[str, ...]
-
-    @property
-    def ratio(self) -> float:
-        """Goals per unit of xG.  Above one means the side is out-scoring its chances."""
-        return self.goals / self.expected if self.expected > 0.0 else math.nan
-
-    @property
-    def material(self) -> bool:
-        return self.expected > 0.0 and abs(self.ratio - 1.0) >= 0.05
-
-
 def _xg_balance(
     team: str, history: MatchLog, supplements: SupplementSet, cutoff: dt.date
-) -> _XgBalance | None:
+) -> XgBalance | None:
     """Pair each supplied xG row with the actual result of the same match.
 
     Pairing on ``(date, home, away)`` rather than counting the last *n* results
@@ -1143,7 +1227,38 @@ def _xg_balance(
         keys.append(f"xg::{row.home} vs {row.away}::{row.date.isoformat()}")
     if matches == 0:
         return None
-    return _XgBalance(team, matches, goals, expected, tuple(keys))
+    return XgBalance(
+        team=team, matches=matches, goals=goals, expected=expected, keys=tuple(keys)
+    )
+
+
+_SUB_REQUIREMENT_SOURCES: Mapping[str, str] = {
+    "buts": "results",
+    "xG": "xg",
+    "xGA": "xg",
+}
+"""Which supplied dataset answers each sub-requirement. Absent ⇒ nothing does."""
+
+
+def _satisfied_requirements(
+    rubric: Rubric, supplements: SupplementSet, has_finding: bool
+) -> tuple[str, ...]:
+    """Which parts of a composite rubric the available data actually answers.
+
+    Ticking a whole rubric because one of its six parts arrived is how a report
+    overstates its own coverage.  A part with no known source stays unmet, and
+    the report names it.
+    """
+    if not rubric.sub_requirements:
+        return ()
+    served = {"results"}
+    if supplements.xg and has_finding:
+        served.add("xg")
+    return tuple(
+        requirement
+        for requirement in rubric.sub_requirements
+        if _SUB_REQUIREMENT_SOURCES.get(requirement) in served
+    )
 
 
 def _supplied_counts(supplements: SupplementSet) -> Mapping[str, int]:
@@ -1232,18 +1347,29 @@ def _supplement_findings(
                     ),
                 )
             )
-        sheets = supplements.lineups_for(team, on_or_before=fixture.date)
+        opponent = fixture.away if team == fixture.home else fixture.home
+        sheets = supplements.lineup_for(
+            team, match_date=fixture.date, opponent=opponent
+        )
         if sheets:
-            official = any(row.status is Confidence.CONFIRMED for row in sheets)
-            keeper = next((row for row in sheets if "gardien" in row.role.lower()), None)
+            official = all(row.status is Confidence.CONFIRMED for row in sheets)
+            starters = [row for row in sheets if row.starting]
+            keeper = next(
+                (row for row in starters if "gardien" in row.role.lower()), None
+            )
             findings.append(
                 Finding(
                     rubric=10,
                     kind=FindingKind.FACT,
                     statement=(
                         f"{team} : composition {'officielle' if official else 'probable'} "
-                        f"relevée ({len(sheets)} joueurs)"
-                        + (f", gardien {keeper.player}" if keeper else "")
+                        f"relevée ({len(starters)} titulaire(s) sur {FULL_LINEUP}, "
+                        f"{len(sheets) - len(starters)} au banc)"
+                        + (
+                            f", gardien titulaire {keeper.player}"
+                            if keeper
+                            else ", gardien titulaire non identifié"
+                        )
                     ),
                     evidence_keys=tuple(
                         f"composition::{row.team}::{row.role or row.player}"
@@ -1335,7 +1461,6 @@ def _documented_scenarios(
     history: MatchLog,
     supplements: SupplementSet,
     build: Callable[..., Scenario],
-    shift: float,
 ) -> list[Scenario]:
     """Scenarios backed by a reported fact — the only kind entitled to a worst case.
 
@@ -1355,18 +1480,14 @@ def _documented_scenarios(
         balance = _xg_balance(team, history, supplements, dossier.fixture.date)
         if balance is None or not balance.material:
             continue
-        factor = max(min(1.0 / balance.ratio, 1.6), 0.6)
+        factor = balance.reversion_factor
         scenarios.append(
             build(
                 f"retour au niveau xG ({team})",
                 home_rate * (factor if is_home else 1.0),
                 away_rate * (1.0 if is_home else factor),
                 ScenarioKind.SPORTING_EVENT,
-                (
-                    f"{balance.goals:.0f} buts pour {balance.expected:.2f} xG sur "
-                    f"{balance.matches} match(s) : rythme multiplié par {factor:.2f}. "
-                    f"Ampleur MESURÉE sur les données fournies, non postulée."
-                ),
+                balance.describe(),
                 evidence_keys=balance.keys[:4],
             )
         )
@@ -1379,18 +1500,19 @@ def _documented_scenarios(
         ]
         if not decisive:
             continue
-        names = ", ".join(row.player for row in decisive)
+        impact = combined_impact(decisive)
+        if impact.neutral:
+            continue
+        # The channel matters more than the size: a missing keeper weakens the
+        # defence, so it is the *opponent's* rate that rises.
+        own, other = impact.own_attack, impact.opponent_attack
         scenarios.append(
             build(
                 f"absences décisives ({team})",
-                home_rate * ((1.0 - shift) if is_home else 1.0),
-                away_rate * (1.0 if is_home else (1.0 - shift)),
+                home_rate * (own if is_home else other),
+                away_rate * (other if is_home else own),
                 ScenarioKind.SPORTING_EVENT,
-                (
-                    f"absence(s) rapportée(s) : {names} — fait DOCUMENTÉ et sourcé ; "
-                    f"l'ampleur (−{shift:.0%} de rythme offensif) est en revanche une "
-                    f"HYPOTHÈSE : aucune estimation validée ne chiffre un joueur ici"
-                ),
+                describe_absences(decisive),
                 evidence_keys=tuple(f"absence::{r.team}::{r.player}" for r in decisive),
             )
         )

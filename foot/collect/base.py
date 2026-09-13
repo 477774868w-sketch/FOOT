@@ -18,11 +18,13 @@ from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from foot.domain import Fixture, MatchLog
+from foot.market.odds import MatchOdds
 from foot.provenance import Evidence, Source, utcnow
 
 __all__ = [
     "Capability",
     "CollectionError",
+    "OddsSource",
     "Provider",
     "ProviderBlockedError",
     "ProviderStatus",
@@ -163,6 +165,30 @@ class SeasonSource(Protocol):
 
     def season(self, competition: str, season: str) -> SeasonData:
         """Results and remaining fixtures for one competition-season."""
+
+
+@runtime_checkable
+class OddsSource(Protocol):
+    """A provider that can quote prices for fixtures.
+
+    Kept separate from :class:`SeasonSource` on purpose: the engine consults a
+    price source **only after the sport dossier is sealed**, so the two contracts
+    must not be reachable through one object the sport phase already holds.
+    """
+
+    @property
+    def name(self) -> str:
+        """Identifier used in reports."""
+
+    @property
+    def capabilities(self) -> frozenset[Capability]:
+        """What this provider offers."""
+
+    def odds(self) -> tuple[dict[Fixture, MatchOdds], list[Evidence]]:
+        """Prices this provider can quote, with the evidence naming their origin."""
+
+    def quoted_at(self) -> dt.datetime | None:
+        """When those prices were observed, when the source knows it."""
 
 
 @runtime_checkable

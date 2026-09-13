@@ -24,7 +24,7 @@ from foot.collect.base import (
     ResultSet,
     SeasonData,
 )
-from foot.data.csv_source import load_matches, load_odds
+from foot.data.csv_source import load_fixtures, load_matches, load_odds
 from foot.domain import Fixture, MatchLog
 from foot.market.odds import MatchOdds
 from foot.provenance import Confidence, Evidence, Source, utcnow
@@ -44,9 +44,11 @@ class ManualProvider:
     __slots__ = (
         "_competition_key",
         "_fixtures",
+        "_fixtures_csv",
         "_label",
         "_odds",
         "_odds_csv",
+        "_odds_quoted_at",
         "_results",
         "_results_csv",
     )
@@ -59,6 +61,8 @@ class ManualProvider:
         results: MatchLog | None = None,
         fixtures: Sequence[Fixture] = (),
         odds: Mapping[Fixture, MatchOdds] | None = None,
+        odds_quoted_at: dt.datetime | None = None,
+        fixtures_csv: str | Path | None = None,
         label: str = "saisie manuelle",
         competition_key: str = "manuel",
     ) -> None:
@@ -67,8 +71,10 @@ class ManualProvider:
         self._results_csv = Path(results_csv) if results_csv else None
         self._odds_csv = Path(odds_csv) if odds_csv else None
         self._results = results
+        self._fixtures_csv = Path(fixtures_csv) if fixtures_csv else None
         self._fixtures = tuple(fixtures)
         self._odds = dict(odds or {})
+        self._odds_quoted_at = odds_quoted_at
 
     @property
     def name(self) -> str:
@@ -83,7 +89,7 @@ class ManualProvider:
         caps = set()
         if self._results_csv or self._results is not None:
             caps.add(Capability.RESULTS)
-        if self._fixtures:
+        if self._fixtures or self._fixtures_csv:
             caps.add(Capability.FIXTURES)
         if self._odds_csv or self._odds:
             caps.add(Capability.ODDS)
@@ -116,7 +122,7 @@ class ManualProvider:
             season=season,
             label=self._label,
             played=matches,
-            fixtures=self._fixtures,
+            fixtures=self.fixtures(),
             retrieved_at=utcnow(),
             url=str(self._results_csv) if self._results_csv else "",
         )
@@ -167,12 +173,31 @@ class ManualProvider:
         )
 
     def fixtures(self) -> tuple[Fixture, ...]:
-        return self._fixtures
+        """Fixtures supplied inline, plus any read from the calendar file.
+
+        Giving the operator a calendar route matters where no automatic one
+        exists: without a verifiable fixture, a match can never leave the
+        "unverified" state, and nothing is ever recommended for it.
+        """
+        if self._fixtures_csv is None:
+            return self._fixtures
+        if not self._fixtures_csv.exists():
+            raise CollectionError(f"calendrier introuvable : {self._fixtures_csv}")
+        loaded = load_fixtures(self._fixtures_csv, competition=self._competition_key)
+        seen = {(f.date, f.home, f.away) for f in self._fixtures}
+        return (
+            *self._fixtures,
+            *(f for f in loaded if (f.date, f.home, f.away) not in seen),
+        )
+
+    def quoted_at(self) -> dt.datetime | None:
+        """When the supplied prices were observed, when the operator says so."""
+        return self._odds_quoted_at
 
     def odds(self) -> tuple[dict[Fixture, MatchOdds], list[Evidence]]:
         """Operator-supplied prices, with evidence naming them as such."""
         book = dict(self._odds)
-        now = utcnow()
+        now = self._odds_quoted_at or utcnow()
         if self._odds_csv is not None:
             if not self._odds_csv.exists():
                 raise CollectionError(f"fichier de cotes introuvable : {self._odds_csv}")
@@ -185,7 +210,15 @@ class ManualProvider:
                 retrieved_at=now,
                 status=Confidence.PROBABLE,
                 fact_date=fixture.date,
-                note="cote fournie par l'opérateur ; horodatage = saisie",
+                note=(
+                    "cote fournie par l'opérateur ; relevée le "
+                    + (
+                        self._odds_quoted_at.strftime("%Y-%m-%d %H:%M %Z")
+                        if self._odds_quoted_at is not None
+                        else "(heure de relevé non déclarée : "
+                        "l'ancienneté du prix ne peut pas être vérifiée)"
+                    )
+                ),
             )
             for fixture, quote in book.items()
         ]

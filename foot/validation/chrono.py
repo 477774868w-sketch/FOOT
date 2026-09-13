@@ -318,6 +318,17 @@ def paired_difference_interval(
     )
 
 
+PRODUCTION_RIDGE_PSEUDO_MATCHES = 120.0
+"""The engine's own ridge rule, mirrored here so the measured configuration is
+the recommended one.
+
+Kept as a constant rather than imported from ``foot.analysis.engine`` to avoid
+making the validation layer depend on the analysis layer; the two are tied
+together by ``test_the_validated_configuration_is_the_recommended_one``, which
+fails if they drift.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class _Variant:
     """One fitted configuration, and the single knob that distinguishes it."""
@@ -326,6 +337,33 @@ class _Variant:
     half_life: float | None
     ridge: float
     correction: bool
+    adaptive_ridge: float = 0.0
+    """When positive, the ridge is recomputed per window as pseudo/effective.
+
+    This is the production rule, and measuring it matters: validating a fixed
+    ridge and then recommending an adaptive one means the published numbers
+    describe a configuration nobody runs.
+    """
+
+    def ridge_for(self, train: MatchLog) -> float:
+        if self.adaptive_ridge <= 0.0:
+            return self.ridge
+        effective = _effective_matches(train, self.half_life)
+        return max(0.0, self.adaptive_ridge / max(effective, 1.0))
+
+
+def _effective_matches(train: MatchLog, half_life: float | None) -> float:
+    """Decay-weighted sample size, the same quantity the engine feeds its rule."""
+    if not train:
+        return 0.0
+    if half_life is None or half_life <= 0.0:
+        return float(len(train))
+    end = train.end  # non-empty: the guard above rules out the empty log
+    total = 0.0
+    for match in train:
+        age = (end - match.date).days
+        total += 0.5 ** (age / half_life)
+    return total
 
 
 def validate(
@@ -350,6 +388,15 @@ def validate(
         _Variant("sans correction bas scores", 240.0, 0.3, False),
         _Variant("sans décroissance temporelle", None, 0.3, True),
         _Variant("sans régularisation", 240.0, 0.0, True),
+        # The configuration the engine actually recommends with. Without it the
+        # report measures a model the operator never runs.
+        _Variant(
+            "configuration de production",
+            240.0,
+            0.3,
+            True,
+            adaptive_ridge=PRODUCTION_RIDGE_PSEUDO_MATCHES,
+        ),
     ]
 
     tuned: list[tuple[dt.date, float, float]] = []
@@ -377,7 +424,7 @@ def validate(
             try:
                 fitted[variant.name] = DixonColesModel(
                     half_life_days=variant.half_life,
-                    ridge=variant.ridge,
+                    ridge=variant.ridge_for(fold.train),
                     low_score_correction=variant.correction,
                 ).fit(fold.train, reference_date=fold.cutoff)
             except (ValueError, RuntimeError):

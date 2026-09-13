@@ -18,12 +18,12 @@ an automatic re-check is never claimed, because none runs here.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 
 from foot.analysis.request import ResolvedMatch, resolve_timezone
-from foot.collect.supplements import AbsenceRow, LineupRow
+from foot.collect.supplements import FULL_LINEUP, AbsenceRow, SupplementSet
+from foot.domain import Fixture
 from foot.provenance import Confidence, Evidence, Source
 
 __all__ = [
@@ -61,25 +61,44 @@ class LineupImpact(Enum):
 
 @dataclass(frozen=True, slots=True)
 class LineupObservation:
-    """A lineup actually seen, probable or official."""
+    """One team's sheet for one fixture, as actually seen.
+
+    An observation belongs to **a team and a match**, never to a team in
+    general: attaching an August sheet to a September fixture is how a report
+    ends up announcing an official lineup nobody published.
+    """
 
     observed_at: dt.datetime
     status: Confidence
     source: str
+    team: str = ""
     goalkeeper: str | None = None
     absences: tuple[str, ...] = ()
+    starters: int = 0
+    bench: int = 0
     notes: str = ""
 
     @property
     def official(self) -> bool:
         return self.status is Confidence.CONFIRMED
 
+    @property
+    def complete(self) -> bool:
+        """A sheet is complete only once a full eleven has been named."""
+        return self.starters >= FULL_LINEUP
+
     def render(self) -> str:
         label = "officielle" if self.official else "probable"
-        parts = [f"composition {label} — {self.source}",
+        if not self.complete:
+            label += f" mais PARTIELLE ({self.starters}/{FULL_LINEUP} titulaires)"
+        parts = [f"{self.team} : composition {label} — {self.source}",
                  f"vue le {self.observed_at.strftime('%Y-%m-%d %H:%M %Z')}"]
         if self.goalkeeper:
-            parts.append(f"gardien : {self.goalkeeper}")
+            parts.append(f"gardien titulaire : {self.goalkeeper}")
+        elif self.starters:
+            parts.append("gardien titulaire non identifié")
+        if self.bench:
+            parts.append(f"banc : {self.bench}")
         if self.absences:
             parts.append(f"absents : {', '.join(self.absences)}")
         return " · ".join(parts)
@@ -98,29 +117,65 @@ class LineupPlan:
     """True only if a live scheduler is wired up; false here, and reported as such."""
 
     observations: list[LineupObservation] = field(default_factory=list)
+    """The current sheet per team — at most one each."""
+
+    superseded: list[LineupObservation] = field(default_factory=list)
+    """Earlier versions, kept so a revision can be shown rather than implied."""
+
     impact: LineupImpact | None = None
     impact_reason: str = ""
 
     def record(
         self, observation: LineupObservation, *, impact: LineupImpact, reason: str
     ) -> None:
-        """Register a real observation and its effect on the dossier."""
+        """Register a real observation and its effect on the dossier.
+
+        A later sheet for the same team **replaces** the earlier one rather than
+        piling up next to it: an official eleven published at T−60 supersedes the
+        probable one, and a plan that keeps both cannot answer "who is playing".
+        The replaced version is kept in :attr:`superseded` so the revision stays
+        visible.
+        """
         if not reason.strip():
             raise ValueError("un changement de composition doit être motivé")
-        self.observations.append(observation)
+        for index, existing in enumerate(self.observations):
+            if existing.team == observation.team:
+                self.superseded.append(existing)
+                self.observations[index] = observation
+                break
+        else:
+            self.observations.append(observation)
         self.impact = impact
         self.impact_reason = reason
 
     @property
     def has_official(self) -> bool:
-        return any(o.official for o in self.observations)
+        """True only when **every** side observed has an official sheet.
+
+        ``any()`` here was a real defect: one official home sheet made a probable
+        away sheet read as official too.
+        """
+        return bool(self.observations) and all(o.official for o in self.observations)
+
+    @property
+    def complete(self) -> bool:
+        """Both teams named a full eleven — the only state that closes the check."""
+        return len(self.observations) >= 2 and all(
+            o.complete for o in self.observations
+        )
 
     def state(self) -> str:
         if not self.observations:
             return "À FAIRE — aucune composition relevée à ce jour"
-        latest = self.observations[-1]
         verdict = self.impact.value if self.impact else "sans effet enregistré"
-        return f"{latest.render()} → dossier {verdict} ({self.impact_reason})"
+        sheets = " | ".join(o.render() for o in self.observations)
+        missing = "" if self.complete else " — relevé PARTIEL, contrôle non clos"
+        revised = (
+            f" [{len(self.superseded)} version(s) remplacée(s)]"
+            if self.superseded
+            else ""
+        )
+        return f"{sheets}{missing}{revised} → dossier {verdict} ({self.impact_reason})"
 
     def render(self) -> str:
         zone = resolve_timezone(self.timezone)
@@ -180,15 +235,24 @@ def plan_lineup_checks(
 def record_supplied_lineups(
     plan: LineupPlan,
     *,
-    sheets: Sequence[LineupRow],
-    absences: Sequence[AbsenceRow],
-    observed_at: dt.datetime,
+    fixture: Fixture,
+    supplements: SupplementSet,
+    as_of: dt.datetime,
 ) -> None:
-    """Turn operator-imported team sheets into a real observation and a verdict.
+    """Turn operator-imported team sheets into real observations and a verdict.
+
+    Three rules make the difference between a check and a claim:
+
+    * a sheet is read **per team and per fixture**. A row dated another day, or
+      naming another opponent, is not this match's lineup and is ignored;
+    * a sheet's status is its **own**. An official home sheet says nothing about
+      the away side, which keeps its "probable" until someone publishes it;
+    * a sheet of one line is a **partial** sheet. Completeness is stated, so the
+      T−75 check is never reported as closed when it is not.
 
     The verdict is derived only from what was supplied — never guessed:
 
-    * a decisive absence reported for a team (a watched position) degrades the
+    * an absence still holding at kick-off, at a watched position, degrades the
       dossier, and the reason names the players;
     * otherwise the dossier is *maintained*, and the reason says explicitly that
       no reference lineup existed to compare against, so "maintained" means
@@ -197,41 +261,65 @@ def record_supplied_lineups(
     No coefficient is applied either way: the verdict routes the dossier to a
     documented sporting scenario, which is where an absence is allowed to weigh.
     """
-    if not sheets:
-        return
-    official = any(row.status is Confidence.CONFIRMED for row in sheets)
-    keeper = next((row for row in sheets if "gardien" in row.role.lower()), None)
-    source = sheets[0].source
-    decisive = [row for row in absences if row.decisive]
-    observation = LineupObservation(
-        observed_at=observed_at,
-        status=Confidence.CONFIRMED if official else Confidence.PROBABLE,
-        source=source,
-        goalkeeper=keeper.player if keeper else None,
-        absences=tuple(row.player for row in decisive),
-        notes=f"{len(sheets)} joueur(s) importés par l'opérateur",
-    )
-    if decisive:
-        plan.record(
-            observation,
-            impact=LineupImpact.DEGRADED,
-            reason=(
-                "absence(s) à un poste suivi : "
-                + ", ".join(f"{row.player} ({row.role})" for row in decisive)
-                + " — le dossier est réévalué par scénario sportif documenté, "
-                "sans coefficient automatique"
-            ),
+    observations: list[LineupObservation] = []
+    decisive: list[AbsenceRow] = []
+    for team, opponent in ((fixture.home, fixture.away), (fixture.away, fixture.home)):
+        rows = supplements.lineup_for(
+            team, match_date=fixture.date, opponent=opponent, as_of=as_of
         )
+        team_absences = [
+            row
+            for row in supplements.absences_for(
+                team, on_or_before=fixture.date, as_of=as_of
+            )
+            if row.decisive and row.status.is_usable
+        ]
+        decisive.extend(team_absences)
+        if not rows:
+            continue
+        starters = [row for row in rows if row.starting]
+        keeper = next(
+            (row for row in starters if "gardien" in row.role.lower()), None
+        )
+        observations.append(
+            LineupObservation(
+                observed_at=max(
+                    (row.published_at for row in rows if row.published_at is not None),
+                    default=as_of,
+                ),
+                status=(
+                    Confidence.CONFIRMED
+                    if rows and all(r.status is Confidence.CONFIRMED for r in rows)
+                    else Confidence.PROBABLE
+                ),
+                source=rows[0].source,
+                team=team,
+                goalkeeper=keeper.player if keeper else None,
+                absences=tuple(row.player for row in team_absences),
+                starters=len(starters),
+                bench=len(rows) - len(starters),
+                notes=f"{len(rows)} joueur(s) importés par l'opérateur",
+            )
+        )
+    if not observations:
         return
-    plan.record(
-        observation,
-        impact=LineupImpact.MAINTAINED,
-        reason=(
+    if decisive:
+        impact = LineupImpact.DEGRADED
+        reason = (
+            "absence(s) à un poste suivi : "
+            + ", ".join(f"{row.player} ({row.role})" for row in decisive)
+            + " — le dossier est réévalué par scénario sportif documenté, "
+            "sans coefficient automatique"
+        )
+    else:
+        impact = LineupImpact.MAINTAINED
+        reason = (
             "aucune absence à un poste suivi dans les données fournies ; "
             "aucune composition antérieure de référence n'existait, donc "
             "« maintenu » signifie « rien ne le contredit », pas « confirmé »"
-        ),
-    )
+        )
+    for observation in observations:
+        plan.record(observation, impact=impact, reason=reason)
 
 
 def lineup_evidence(observation: LineupObservation, fixture_label: str) -> Evidence:
