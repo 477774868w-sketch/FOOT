@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from typing import Any
 
 from foot.collect.base import Capability, CollectionError, ProviderBlockedError, Reachability
 from foot.collect.cache import Cache
@@ -21,12 +22,18 @@ from foot.collect.registry import Registry
 
 from support import assert_raises
 
-try:  # pytest is optional: the in-house runner has no marker concept.
+# pytest is optional here: `python3 tests/run_tests.py --sans-reseau` applies the
+# same separation without it. The annotation is deliberately `Any` so the module
+# type-checks identically whether or not pytest is installed — mypy inferred a
+# `MarkDecorator` where pytest was present and rejected the fallback, which made
+# the local check disagree with CI about code neither had changed.
+pytestmark: Any = ()
+try:
     import pytest
 
     pytestmark = pytest.mark.network
 except ImportError:  # pragma: no cover - exercised only without pytest
-    pytestmark = None
+    pass
 
 _SEASON = "2026-27"
 

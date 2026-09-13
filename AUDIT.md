@@ -414,6 +414,18 @@ corrections :
   versions contre lesquelles ces chiffres ont été obtenus. Mettre à jour un
   outil devient un changement délibéré.
 
+Le second passage a échoué sur `mypy`, pour une raison voisine : en CI `pytest`
+est importable, donc `pytest.mark.network` a un type concret que la branche de
+repli (`None`) contredisait ; ici `pytest` vit dans un interpréteur séparé et
+mypy ne le voit pas, donc l'erreur ne pouvait pas apparaître localement. Le
+marqueur est désormais annoté de façon à se vérifier **à l'identique dans les
+deux cas**.
+
+**Limite connue du poste de développement** : `pytest` n'y étant pas importable
+par l'interpréteur qui exécute `mypy`, la vérification de types locale est
+strictement plus faible que celle de la CI sur les fichiers qui l'importent.
+C'est la CI qui fait foi.
+
 Le job **réseau a réussi sur GitHub Actions**, là où `football-data.co.uk` est
 bloqué dans l'environnement de développement : le blocage constaté ici ne décrit
 donc pas l'environnement d'exécution final, comme la revue l'avait noté.
