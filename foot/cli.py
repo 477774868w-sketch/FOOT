@@ -26,6 +26,7 @@ from foot.collect import (
     Provider,
     Registry,
 )
+from foot.collect.supplements import load_supplements
 from foot.data.csv_source import load_matches
 from foot.data.synthetic import LeagueTruth, synthetic_league, synthetic_odds
 from foot.domain import Fixture, MatchLog
@@ -455,12 +456,21 @@ def command_analyser(args: argparse.Namespace) -> int:
     engine = Engine(
         registry,
         config=EngineConfig(
-            half_life_days=args.demi_vie, timezone=args.fuseau, seasons=tuple(args.saisons)
+            half_life_days=args.demi_vie,
+            timezone=args.fuseau,
+            seasons=tuple(args.saisons),
+            rubrics_path=Path(args.protocole) if args.protocole else None,
         ),
+    )
+    supplements = load_supplements(
+        xg_csv=args.xg_csv,
+        absences_csv=args.absences_csv,
+        lineups_csv=args.compositions_csv,
     )
     run = engine.run(
         text, as_of=as_of, timezone=args.fuseau,
         bookmaker=args.bookmaker, quoted_at=as_of,
+        supplements=supplements,
     )
 
     print(_heading("ANALYSE"))
@@ -535,7 +545,13 @@ def command_valider(args: argparse.Namespace) -> int:
 
 def command_web(args: argparse.Namespace) -> int:
     """Serve the French interface."""
-    engine = Engine(_build_registry(args), config=EngineConfig(timezone=args.fuseau))
+    engine = Engine(
+        _build_registry(args),
+        config=EngineConfig(
+            timezone=args.fuseau,
+            rubrics_path=Path(args.protocole) if args.protocole else None,
+        ),
+    )
     serve(engine, host=args.hote, port=args.port)
     return 0
 
@@ -616,6 +632,22 @@ def build_parser() -> argparse.ArgumentParser:
                            help="saisons chargées pour l'historique")
         group.add_argument("--resultats-csv", help="import manuel de résultats (CSV)")
         group.add_argument("--cotes-csv", help="import manuel de cotes (CSV)")
+        group.add_argument(
+            "--protocole",
+            help="fichier JSON des rubriques (défaut : protocole/protocole-22-rubriques.json)",
+        )
+        group.add_argument(
+            "--xg-csv",
+            help="xG fournis par l'opérateur : date,home,away,home_xg,away_xg[,source,statut]",
+        )
+        group.add_argument(
+            "--absences-csv",
+            help="absences : date,equipe,joueur[,poste,motif,source,statut]",
+        )
+        group.add_argument(
+            "--compositions-csv",
+            help="compositions : date,equipe,joueur[,poste,titulaire,source,statut]",
+        )
 
     analyser = subparsers.add_parser(
         "analyser", help="analyser une ou plusieurs rencontres (parcours principal)"

@@ -11,6 +11,8 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import io
+import math
+import random
 from collections.abc import Sequence
 from zoneinfo import ZoneInfo
 
@@ -18,6 +20,7 @@ from foot.analysis.dossier import OddsLeakError, SportInput, assert_odds_free
 from foot.analysis.engine import Engine, EngineConfig
 from foot.analysis.lineups import LineupImpact, LineupObservation
 from foot.analysis.request import KickoffStatus, RequestStatus, kickoff_status
+from foot.analysis.rubrics import RubricImplementation
 from foot.cli import main
 from foot.collect.base import (
     Capability,
@@ -45,8 +48,18 @@ _TEAMS = [f"Club {chr(65 + i)}" for i in range(10)]
 _COMP = "Ligue de contrôle"
 
 
-def _controlled_history(*, start: dt.date = dt.date(2025, 8, 1), rounds: int = 14) -> MatchLog:
-    """A deterministic double round-robin, strong teams first in the list."""
+def _controlled_history(
+    *, start: dt.date = dt.date(2025, 8, 1), rounds: int = 20, seed: int = 20260913
+) -> MatchLog:
+    """A deterministic league with realistic score variety.
+
+    Seeded rather than formulaic: an earlier version emitted only a handful of
+    perfectly separable scorelines, which made the Dixon-Coles likelihood
+    unbounded and the fit non-convergent — masking, rather than testing, the
+    behaviour under study.  Goals are drawn here from team-dependent rates, so
+    the data is reproducible *and* the estimator has something to estimate.
+    """
+    rng = random.Random(seed)
     matches: list[Match] = []
     day = start
     for round_number in range(rounds):
@@ -54,13 +67,27 @@ def _controlled_history(*, start: dt.date = dt.date(2025, 8, 1), rounds: int = 1
             home, away = _TEAMS[i], _TEAMS[(i + 1 + round_number) % len(_TEAMS)]
             if home == away:
                 continue
-            strength = (_TEAMS.index(away) - _TEAMS.index(home)) // 3
+            edge = (_TEAMS.index(away) - _TEAMS.index(home)) * 0.06
+            home_rate = math.exp(0.22 + edge) * 1.25
+            away_rate = math.exp(-edge) * 1.05
             matches.append(
-                Match(home, away, day, Score(max(0, 1 + strength), max(0, 1 - strength)),
-                      competition=_COMP)
+                Match(
+                    home, away, day,
+                    Score(_poisson(rng, home_rate), _poisson(rng, away_rate)),
+                    competition=_COMP,
+                )
             )
         day += dt.timedelta(days=7)
     return MatchLog(matches)
+
+
+def _poisson(rng: random.Random, rate: float) -> int:
+    """Knuth's method — small rates, and no dependency on an RNG library."""
+    limit, count, product = math.exp(-rate), 0, rng.random()
+    while product > limit:
+        count += 1
+        product *= rng.random()
+    return count
 
 
 class StubProvider:
@@ -123,6 +150,9 @@ def _engine(provider: StubProvider | None = None, **config: object) -> Engine:
     fixtures = [
         Fixture("Club A", "Club B", dt.date(2026, 9, 14), competition=_COMP),
         Fixture("Club C", "Club D", dt.date(2026, 9, 14), competition=_COMP),
+        # A fixture on the analysis day itself, so the "already started" path can
+        # be exercised on a *verified* match rather than an unverified pairing.
+        Fixture("Club E", "Club F", dt.date(2026, 9, 13), competition=_COMP),
     ]
     stub = provider or StubProvider(_controlled_history(), fixtures)
     return Engine(
@@ -214,7 +244,8 @@ def test_timezone_is_honoured_and_a_bad_one_fails_loudly() -> None:
 
 def test_a_started_match_gets_no_prematch_recommendation() -> None:
     """A pre-match read must never be dressed up as a live one."""
-    # Club E vs Club F has no scheduled fixture, so the typed date is used as is.
+    # Club E vs Club F is in the calendar on the analysis day, so the match is
+    # verified *and* already under way — the case the rule is about.
     run = _engine().run("Club E - Club F 13/09/2026 10:00", as_of=AS_OF)
     analysis = run.analyses[0]
     assert analysis.resolved.kickoff_status in (
@@ -246,9 +277,16 @@ def test_an_unreachable_source_blocks_its_rubrics_without_inventing_data() -> No
     assert analysis.analysed
     unavailable = [a for a in analysis.rubrics if a.blocker]
     assert unavailable, "aucune rubrique marquée indisponible alors que xG et compositions manquent"
+    # The blocker now states *which* of the three situations applies, so the
+    # operator can tell "never written" from "written but unreachable" from
+    # "supply it yourself".
     for assessment in unavailable:
-        assert "aucun fournisseur accessible" in assessment.blocker
+        assert any(
+            marker in assessment.blocker
+            for marker in ("aucun adaptateur écrit", "injoignable", "aucune source automatique")
+        ), assessment.blocker
         assert not assessment.summary, "une rubrique bloquée ne doit rien affirmer"
+        assert assessment.implementation is not RubricImplementation.OPERATIONAL
     card = render_card(analysis)
     assert "aucune valeur n'a été substituée" in card
 

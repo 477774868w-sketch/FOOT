@@ -2,12 +2,16 @@
 """A zero-dependency runner for the test suite.
 
 ``pytest tests`` is the normal way in.  This script exists so that the suite can
-also be verified on a machine with nothing installed at all:
+also be verified on a machine with nothing installed at all::
 
-    python3 tests/run_tests.py [-v] [pattern ...]
+    python3 tests/run_tests.py [-v] [motif ...]
 
-It discovers ``test_*`` functions in ``tests/test_*.py`` and runs them, which is
-the entire feature set of pytest that this suite uses.
+It discovers ``test_*`` functions in ``tests/test_*.py`` and runs them, counting
+**passed, failed and skipped separately**.  That last distinction is not
+cosmetic: an earlier version let a network test print "IGNORÉ" and return
+normally, so an untested path was reported as a success.  A test that cannot run
+now raises :class:`unittest.SkipTest` — which pytest also understands natively —
+and is counted as skipped, never as passed.
 """
 
 from __future__ import annotations
@@ -16,33 +20,80 @@ import importlib.util
 import sys
 import time
 import traceback
+import unittest
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 
 TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parent
 
 
-def load(path: Path) -> object:
+@dataclass
+class Summary:
+    """Outcome of a run, with the three counts kept apart.
+
+    Deliberately not ``slots=True``: that variant rebuilds the class and needs
+    its module already registered in :data:`sys.modules`, which fails whenever
+    this file is loaded dynamically — exactly what the regression test does.
+    """
+
+    passed: int = 0
+    failed: int = 0
+    skipped: int = 0
+    failures: list[tuple[str, str]] = field(default_factory=list)
+    skips: list[tuple[str, str]] = field(default_factory=list)
+    elapsed: float = 0.0
+
+    @property
+    def total(self) -> int:
+        return self.passed + self.failed + self.skipped
+
+    @property
+    def ok(self) -> bool:
+        """Skipped tests are not failures, but they are not successes either."""
+        return self.failed == 0
+
+    def render(self) -> str:
+        lines: list[str] = []
+        for label, trace in self.failures:
+            lines.append(f"\n{'=' * 70}\nÉCHEC {label}\n{'=' * 70}\n{trace}")
+        if self.skips:
+            lines.append(f"\n{'-' * 70}\nIGNORÉS ({len(self.skips)})")
+            lines.extend(f"  {label} : {reason}" for label, reason in self.skips)
+        lines.append(
+            f"{self.passed} réussi(s), {self.failed} échec(s), "
+            f"{self.skipped} ignoré(s) sur {self.total} en {self.elapsed:.2f}s"
+        )
+        return "\n".join(lines)
+
+
+def load(path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(f"footests.{path.stem}", path)
     if spec is None or spec.loader is None:  # pragma: no cover - import machinery
-        raise ImportError(f"cannot load {path}")
+        raise ImportError(f"impossible de charger {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-def main(argv: list[str]) -> int:
-    verbose = "-v" in argv
-    patterns = [a for a in argv if not a.startswith("-")]
-    sys.path.insert(0, str(ROOT))
-    sys.path.insert(0, str(TESTS))
+def run_suite(
+    directory: Path,
+    *,
+    patterns: list[str] | None = None,
+    verbose: bool = False,
+    echo: bool = False,
+) -> Summary:
+    """Run every discovered test, returning the three counts.
 
-    passed = failed = 0
-    failures: list[tuple[str, str]] = []
+    Args:
+        patterns: substrings matched against ``module::function`` labels.
+        echo: print progress dots as the run proceeds.
+    """
+    summary = Summary()
     started = time.time()
-
-    for path in sorted(TESTS.glob("test_*.py")):
+    for path in sorted(directory.glob("test_*.py")):
         module = load(path)
         for name in sorted(dir(module)):
             if not name.startswith("test_"):
@@ -55,24 +106,36 @@ def main(argv: list[str]) -> int:
                 continue
             try:
                 function()
+            except unittest.SkipTest as skip:
+                summary.skipped += 1
+                summary.skips.append((label, str(skip)))
+                mark = "s"
             except Exception:
-                failed += 1
-                failures.append((label, traceback.format_exc()))
-                print("F", end="", flush=True)
-                if verbose:
-                    print(f" {label}")
+                summary.failed += 1
+                summary.failures.append((label, traceback.format_exc()))
+                mark = "F"
             else:
-                passed += 1
-                print(".", end="", flush=True)
+                summary.passed += 1
+                mark = "."
+            if echo:
+                print(mark, end="", flush=True)
                 if verbose:
                     print(f" {label}")
+    summary.elapsed = time.time() - started
+    return summary
 
-    elapsed = time.time() - started
+
+def main(argv: list[str]) -> int:
+    verbose = "-v" in argv
+    patterns = [a for a in argv if not a.startswith("-")]
+    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(TESTS))
+    summary = run_suite(
+        TESTS, patterns=patterns or None, verbose=verbose, echo=True
+    )
     print()
-    for label, trace in failures:
-        print(f"\n{'=' * 70}\nFAILED {label}\n{'=' * 70}\n{trace}")
-    print(f"{passed} passed, {failed} failed in {elapsed:.2f}s")
-    return 1 if failed else 0
+    print(summary.render())
+    return 0 if summary.ok else 1
 
 
 if __name__ == "__main__":

@@ -136,21 +136,40 @@ class SettlementProfile:
         """
         return self.expected_return(decimal_odds) - 1.0
 
+    def odds_for_expected_value(self, target: float) -> float:
+        """The decimal price at which expected value equals ``target``.
+
+        Expected value is affine in the odds:
+
+            EV(o) = slope · o − slope − 0.5·P(demi-perte) − P(perte),
+            slope = P(gagné) + 0.5·P(demi-gain)
+
+        so the threshold inverts exactly.  Scaling the break-even price by
+        ``1 + target`` — the obvious shortcut — is **wrong whenever the market
+        can refund**, because a refund is neither a win nor a loss and does not
+        scale with the price.  Worked example: 40 % win, 35 % push, 25 % loss
+        requires 1.70 for a 3 % edge; the shortcut returns 1.67, which actually
+        yields 1.95 %.
+
+        Returns ``inf`` when no price reaches the target, which happens exactly
+        when the bet cannot win.
+        """
+        if not math.isfinite(target):
+            raise ValueError(f"espérance visée non finie : {target!r}")
+        slope = self.probability(Settlement.WIN) + 0.5 * self.probability(Settlement.HALF_WIN)
+        if slope <= 0.0:
+            return math.inf
+        deficit = self.probability(Settlement.LOSS) + 0.5 * self.probability(
+            Settlement.HALF_LOSS
+        )
+        return (target + slope + deficit) / slope
+
     def break_even_odds(self) -> float:
         """The price at which expected value turns positive.
 
         ``inf`` when the bet cannot win, since no price makes it worth taking.
         """
-        win = self.probability(Settlement.WIN)
-        half_win = self.probability(Settlement.HALF_WIN)
-        loss = self.probability(Settlement.LOSS)
-        half_loss = self.probability(Settlement.HALF_LOSS)
-        slope = win + 0.5 * half_win  # d(return)/d(odds)
-        if slope <= 0.0:
-            return math.inf
-        # return = 1 + slope*(o-1) - loss - 0.5*half_loss  ... solve return == 1
-        deficit = loss + 0.5 * half_loss
-        return 1.0 + deficit / slope
+        return self.odds_for_expected_value(0.0)
 
     def risked_fraction(self) -> float:
         """Share of the stake genuinely exposed, after refunds."""

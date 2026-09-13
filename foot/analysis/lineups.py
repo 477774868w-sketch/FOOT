@@ -8,20 +8,31 @@ must say plainly that a check is still outstanding.*
 This module therefore plans and records; it never claims a check happened.
 :meth:`LineupPlan.state` returns ``À FAIRE`` until something calls
 :meth:`LineupPlan.record`, and the report prints exactly that.  No provider in
-this deployment serves lineups, so in practice the plan stays outstanding and
-says so — which is the honest outcome, not a failure.
+this deployment serves lineups, so the plan stays outstanding unless the
+operator imports the sheets — in which case
+:func:`record_supplied_lineups` turns them into real observations, with a
+verdict justified by what was actually supplied.  Nothing else moves the plan:
+an automatic re-check is never claimed, because none runs here.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 
 from foot.analysis.request import ResolvedMatch, resolve_timezone
+from foot.collect.supplements import AbsenceRow, LineupRow
 from foot.provenance import Confidence, Evidence, Source
 
-__all__ = ["LineupImpact", "LineupObservation", "LineupPlan", "plan_lineup_checks"]
+__all__ = [
+    "LineupImpact",
+    "LineupObservation",
+    "LineupPlan",
+    "plan_lineup_checks",
+    "record_supplied_lineups",
+]
 
 WATCHED_ROLES: tuple[str, ...] = (
     "gardien",
@@ -164,6 +175,63 @@ def plan_lineup_checks(
     if kickoff is not None and as_of > kickoff - dt.timedelta(minutes=75):
         plan.impact_reason = "fenêtre T−75 déjà ouverte au moment de l'analyse"
     return plan
+
+
+def record_supplied_lineups(
+    plan: LineupPlan,
+    *,
+    sheets: Sequence[LineupRow],
+    absences: Sequence[AbsenceRow],
+    observed_at: dt.datetime,
+) -> None:
+    """Turn operator-imported team sheets into a real observation and a verdict.
+
+    The verdict is derived only from what was supplied — never guessed:
+
+    * a decisive absence reported for a team (a watched position) degrades the
+      dossier, and the reason names the players;
+    * otherwise the dossier is *maintained*, and the reason says explicitly that
+      no reference lineup existed to compare against, so "maintained" means
+      "nothing contradicts it", not "confirmed".
+
+    No coefficient is applied either way: the verdict routes the dossier to a
+    documented sporting scenario, which is where an absence is allowed to weigh.
+    """
+    if not sheets:
+        return
+    official = any(row.status is Confidence.CONFIRMED for row in sheets)
+    keeper = next((row for row in sheets if "gardien" in row.role.lower()), None)
+    source = sheets[0].source
+    decisive = [row for row in absences if row.decisive]
+    observation = LineupObservation(
+        observed_at=observed_at,
+        status=Confidence.CONFIRMED if official else Confidence.PROBABLE,
+        source=source,
+        goalkeeper=keeper.player if keeper else None,
+        absences=tuple(row.player for row in decisive),
+        notes=f"{len(sheets)} joueur(s) importés par l'opérateur",
+    )
+    if decisive:
+        plan.record(
+            observation,
+            impact=LineupImpact.DEGRADED,
+            reason=(
+                "absence(s) à un poste suivi : "
+                + ", ".join(f"{row.player} ({row.role})" for row in decisive)
+                + " — le dossier est réévalué par scénario sportif documenté, "
+                "sans coefficient automatique"
+            ),
+        )
+        return
+    plan.record(
+        observation,
+        impact=LineupImpact.MAINTAINED,
+        reason=(
+            "aucune absence à un poste suivi dans les données fournies ; "
+            "aucune composition antérieure de référence n'existait, donc "
+            "« maintenu » signifie « rien ne le contredit », pas « confirmé »"
+        ),
+    )
 
 
 def lineup_evidence(observation: LineupObservation, fixture_label: str) -> Evidence:

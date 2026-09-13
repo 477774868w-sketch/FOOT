@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from foot.analysis.quotes import parse_quote_token
 from foot.collect.manual import parse_odds_line
 from foot.domain import Fixture
+from foot.markets.catalogue import UnsupportedMarketError
 
 __all__ = [
     "DEFAULT_TIMEZONE",
@@ -75,18 +77,30 @@ class RequestStatus(Enum):
 
 
 class KickoffStatus(Enum):
-    """Where the match sits relative to the analysis instant."""
+    """Where the match sits relative to the analysis instant.
+
+    ``UNVERIFIED`` is the important addition: a pair of clubs that both exist is
+    not a scheduled fixture.  Without a matching entry in the loaded calendar the
+    system cannot assert that a match is upcoming, so it refuses to treat it as
+    pre-match rather than assuming one.
+    """
 
     SCHEDULED = "à venir"
     IN_PLAY = "commencé (en cours)"
     FINISHED = "terminé"
+    UNVERIFIED = "non vérifiée au calendrier"
     UNKNOWN_TIME = "horaire inconnu"
     POSTPONED = "reporté"
     CANCELLED = "annulé"
 
     @property
     def allows_prematch(self) -> bool:
-        """Only a match that has not kicked off may receive a pre-match bet."""
+        """Only a verified, not-yet-started fixture may receive a pre-match bet.
+
+        ``UNKNOWN_TIME`` still qualifies — a confirmed fixture whose kickoff hour
+        is unpublished is a real upcoming match — but ``UNVERIFIED`` does not,
+        because nothing establishes that the match exists at all.
+        """
         return self in (KickoffStatus.SCHEDULED, KickoffStatus.UNKNOWN_TIME)
 
 
@@ -102,6 +116,10 @@ class MatchRequest:
     date: dt.date | None = None
     time: dt.time | None = None
     odds: tuple[float, float, float] | None = None
+    quotes: Mapping[str, float] = field(default_factory=dict)
+    """Prices quoted for markets beyond 1–N–2, keyed by catalogue key."""
+    refused_markets: tuple[str, ...] = ()
+    """Quoted markets this system refuses to model (corners, cards, scorers)."""
 
     @property
     def parsed(self) -> bool:
@@ -200,12 +218,50 @@ def _extract_time(text: str) -> tuple[str, dt.time | None]:
     return (text[: match.start()] + " " + text[match.end() :], found)
 
 
+def _extract_quotes(text: str) -> tuple[str, dict[str, float], tuple[str, ...]]:
+    """Pull ``FAMILLE:précision=cote`` tokens out of a line, in any position.
+
+    Tokens are recognised one by one *inside* each ``|`` field, because the guide
+    shows prices both alone in their field and grouped in one.  A field emptied of
+    its prices is dropped rather than left as an empty ``|`` slot, so the bare
+    ``@ 2.10 3.40 3.60`` form — which must end the line — still reads.
+
+    Returns the remaining text, the prices read, and the markets whose price was
+    **refused**: corners, cards and scorers do not follow from the final-score law
+    and get no estimate here.  Refused tokens leave the line (otherwise they stick
+    to a team name) but are reported, never silently dropped.
+    """
+    kept: list[str] = []
+    quotes: dict[str, float] = {}
+    refused: list[str] = []
+    for chunk in text.split("|"):
+        words = chunk.split()
+        if not words:
+            continue
+        remainder: list[str] = []
+        for word in words:
+            try:
+                parsed = parse_quote_token(word)
+            except UnsupportedMarketError:
+                refused.append(word.split("=")[0])
+                continue
+            if parsed is None:
+                remainder.append(word)
+                continue
+            offer, odds = parsed
+            quotes[offer.key] = odds
+        if remainder:
+            kept.append(" ".join(remainder))
+    return ("|".join(kept), quotes, tuple(refused))
+
+
 def parse_line(raw: str, line_number: int, *, today: dt.date) -> MatchRequest:
     """Decompose one typed line.  Never raises: an unreadable line is reported."""
     text = raw.strip()
     if not text or text.startswith("#"):
         return MatchRequest(raw=raw, line_number=line_number)
 
+    text, quotes, refused = _extract_quotes(text)
     text, odds = _extract_odds(text)
     competition = ""
     if "|" in text:
@@ -230,10 +286,11 @@ def parse_line(raw: str, line_number: int, *, today: dt.date) -> MatchRequest:
                 return MatchRequest(
                     raw=raw, line_number=line_number, home_text=home, away_text=away,
                     competition_text=competition, date=date, time=time, odds=odds,
+                    quotes=quotes, refused_markets=refused,
                 )
     return MatchRequest(
         raw=raw, line_number=line_number, competition_text=competition,
-        date=date, time=time, odds=odds,
+        date=date, time=time, odds=odds, quotes=quotes, refused_markets=refused,
     )
 
 
@@ -248,17 +305,34 @@ def parse_requests(text: str, *, today: dt.date | None = None) -> list[MatchRequ
     return requests
 
 
-def kickoff_status(
-    kickoff: dt.datetime | None, as_of: dt.datetime, *, declared: KickoffStatus | None = None
+def kickoff_status(  # noqa: PLR0911 - one exit per distinguishable state
+    kickoff: dt.datetime | None,
+    as_of: dt.datetime,
+    *,
+    declared: KickoffStatus | None = None,
+    match_date: dt.date | None = None,
+    verified: bool = True,
+    timezone: str = DEFAULT_TIMEZONE,
 ) -> KickoffStatus:
     """Classify a kickoff against the analysis instant.
 
-    ``declared`` wins when a source states the match is postponed or cancelled:
-    a calendar comparison cannot know that.
+    Args:
+        declared: wins outright when a source states the match is postponed or
+            cancelled — a calendar comparison cannot know that.
+        match_date: used when no kickoff hour is available; a date already past
+            means the match cannot be a pre-match, whatever the missing hour.
+        verified: whether the fixture was found in the loaded calendar.  An
+            unverified pairing is never reported as upcoming.
     """
     if declared in (KickoffStatus.POSTPONED, KickoffStatus.CANCELLED):
         return declared
+    if not verified:
+        return KickoffStatus.UNVERIFIED
     if kickoff is None:
+        if match_date is not None:
+            local_today = as_of.astimezone(resolve_timezone(timezone)).date()
+            if match_date < local_today:
+                return KickoffStatus.FINISHED
         return KickoffStatus.UNKNOWN_TIME
     if as_of < kickoff:
         return KickoffStatus.SCHEDULED

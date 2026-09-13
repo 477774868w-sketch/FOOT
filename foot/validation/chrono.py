@@ -35,6 +35,7 @@ __all__ = [
     "ValidationReport",
     "block_bootstrap_interval",
     "chronological_folds",
+    "paired_difference_interval",
     "tune_chronologically",
     "validate",
 ]
@@ -78,9 +79,13 @@ def chronological_folds(
     for index in range(folds):
         position = min(index * step, len(usable) - 1)
         cutoff = usable[position]
-        end = usable[min(position + step, len(usable) - 1)] if index < folds - 1 else None
+        following = position + step
+        end = usable[following] if index < folds - 1 and following < len(usable) else None
         train = matches.before(cutoff)
-        test = matches.between(cutoff, end) if end else matches.after(cutoff)
+        # Half-open window [cutoff, end): `between` is inclusive at both ends, so
+        # using it made consecutive folds share their boundary date and score the
+        # same matches twice — 180 distinct fixtures produced 186 evaluations.
+        test = matches.after(cutoff).before(end) if end else matches.after(cutoff)
         if len(test) == 0:
             continue
         built.append(ChronoFold(index=index, cutoff=cutoff, train=train, test=test))
@@ -142,26 +147,65 @@ def tune_chronologically(
 
 @dataclass(frozen=True, slots=True)
 class AblationResult:
-    """What one component contributes, measured by removing it."""
+    """What one component contributes, measured by removing **it alone**.
+
+    Two disciplines make the number mean something.
+
+    First, :attr:`varied` must name exactly one dimension.  Comparing a tuned
+    Dixon-Coles against a fixed Poisson changes the correction, the half-life
+    *and* the shrinkage at once, so whatever the difference shows, it does not
+    show what the correction is worth.
+
+    Second, the verdict rests on the **uncertainty of the difference**, not on
+    its sign.  Scores are paired match by match and bootstrapped in blocks, so
+    a gain whose interval straddles zero is reported as unconfirmed however
+    positive its point estimate.
+    """
 
     component: str
+    varied: tuple[str, ...]
     rps_with: float
     rps_without: float
+    difference_interval: tuple[float, float] | None = None
+    paired_differences: tuple[float, ...] = field(default=(), repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.varied:
+            raise ValueError(f"{self.component} : l'ablation ne déclare pas ce qui varie")
+        if len(self.varied) != 1:
+            raise ValueError(
+                f"{self.component} : {len(self.varied)} dimensions varient "
+                f"({', '.join(self.varied)}) — ce n'est pas une ablation"
+            )
 
     @property
     def gain(self) -> float:
-        """Positive means the component helps."""
+        """Positive means the component helps (lower RPS with it than without)."""
         return self.rps_without - self.rps_with
 
     @property
     def relative_gain(self) -> float:
         return self.gain / self.rps_without if self.rps_without else 0.0
 
+    @property
+    def confirmed(self) -> bool:
+        """True only when the whole interval of the difference sits above zero."""
+        if self.difference_interval is None:
+            return False
+        low, _high = self.difference_interval
+        return self.gain > 0.0 and low > 0.0
+
     def render(self) -> str:
-        verdict = "apport confirmé" if self.gain > 0 else "APPORT NON CONFIRMÉ"
+        verdict = "apport confirmé" if self.confirmed else "APPORT NON CONFIRMÉ"
+        interval = (
+            f"IC95 [{self.difference_interval[0]:+.5f}, {self.difference_interval[1]:+.5f}]"
+            if self.difference_interval
+            else "IC non calculé"
+        )
         return (
-            f"{self.component:<34} avec {self.rps_with:.5f}  sans {self.rps_without:.5f}  "
-            f"gain {self.gain:+.5f} ({self.relative_gain * 100:+.2f}%)  → {verdict}"
+            f"{self.component:<38} varie : {self.varied[0]:<22} "
+            f"avec {self.rps_with:.5f}  sans {self.rps_without:.5f}  "
+            f"gain {self.gain:+.5f}  {interval}  → {verdict}"
         )
 
 
@@ -250,6 +294,40 @@ class ValidationReport:
         return "\n".join(lines)
 
 
+def paired_difference_interval(
+    left: Sequence[float],
+    right: Sequence[float],
+    *,
+    block: int = 10,
+    resamples: int = 2000,
+    level: float = 0.95,
+    seed: int = 0,
+) -> tuple[float, float]:
+    """Confidence interval for the mean *paired* difference ``right - left``.
+
+    Pairing match by match removes the fixture-to-fixture difficulty that both
+    models face equally, which is most of the variance.  Comparing two
+    independent intervals instead would be far too conservative — and comparing
+    point estimates alone, far too generous.
+    """
+    if len(left) != len(right):
+        raise ValueError("les séries appariées doivent avoir la même longueur")
+    differences = [b - a for a, b in zip(left, right, strict=True)]
+    return block_bootstrap_interval(
+        differences, block=block, resamples=resamples, level=level, seed=seed
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _Variant:
+    """One fitted configuration, and the single knob that distinguishes it."""
+
+    name: str
+    half_life: float | None
+    ridge: float
+    correction: bool
+
+
 def validate(
     matches: MatchLog,
     *,
@@ -260,32 +338,50 @@ def validate(
     ablate: bool = True,
     progress: Callable[[int, int], None] | None = None,
 ) -> ValidationReport:
-    """Run an expanding-window validation, tuning inside each training window."""
+    """Run an expanding-window validation, tuning inside each training window.
+
+    Ablations vary **one** dimension at a time against a common reference, and
+    each verdict comes with the bootstrap interval of the paired difference.
+    """
     built = chronological_folds(matches, folds=folds, min_train=min_train)
+    reference = _Variant("référence", 240.0, 0.3, True)
+    variants = [
+        reference,
+        _Variant("sans correction bas scores", 240.0, 0.3, False),
+        _Variant("sans décroissance temporelle", None, 0.3, True),
+        _Variant("sans régularisation", 240.0, 0.0, True),
+    ]
+
     tuned: list[tuple[dt.date, float, float]] = []
-    forecasts: dict[str, list[OutcomeProbabilities]] = {
-        "dixon-coles réglé": [], "dixon-coles fixe": [], "poisson": [], "taux de base": [],
-    }
+    forecasts: dict[str, list[OutcomeProbabilities]] = {v.name: [] for v in variants}
+    forecasts["réglé (demi-vie)"] = []
+    forecasts["réglé (régularisation)"] = []
+    forecasts["taux de base"] = []
     outcomes: list[Outcome] = []
-    per_match_rps: list[float] = []
 
     for position, fold in enumerate(built):
         half_life, ridge = (
             tune_chronologically(fold.train) if tune else (240.0, 0.3)
         )
         tuned.append((fold.cutoff, half_life, ridge))
+        # Two extra variants, each differing from the reference in exactly one
+        # knob, so "what did tuning buy?" can be answered per knob.
+        run_variants = [
+            *variants,
+            _Variant("réglé (demi-vie)", half_life, reference.ridge, True),
+            _Variant("réglé (régularisation)", reference.half_life, ridge, True),
+        ]
 
-        variants = {
-            "dixon-coles réglé": DixonColesModel(half_life_days=half_life, ridge=ridge),
-            "dixon-coles fixe": DixonColesModel(half_life_days=240.0),
-            "poisson": DixonColesModel(half_life_days=240.0, low_score_correction=False),
-        }
         fitted: dict[str, DixonColesModel | None] = {}
-        for name, model in variants.items():
+        for variant in run_variants:
             try:
-                fitted[name] = model.fit(fold.train, reference_date=fold.cutoff)
+                fitted[variant.name] = DixonColesModel(
+                    half_life_days=variant.half_life,
+                    ridge=variant.ridge,
+                    low_score_correction=variant.correction,
+                ).fit(fold.train, reference_date=fold.cutoff)
             except (ValueError, RuntimeError):
-                fitted[name] = None
+                fitted[variant.name] = None
 
         counts = [0.0, 0.0, 0.0]
         for match in fold.train:
@@ -295,12 +391,12 @@ def validate(
         for match in fold.test:
             outcomes.append(match.outcome)
             forecasts["taux de base"].append(base)
-            for name, candidate in fitted.items():
-                if candidate is None:
+            for name, model in fitted.items():
+                if model is None:
                     forecasts[name].append(base)
                     continue
                 try:
-                    forecasts[name].append(candidate.predict(match.fixture))
+                    forecasts[name].append(model.predict(match.fixture))
                 except KeyError:
                     forecasts[name].append(base)
         if progress:
@@ -312,36 +408,54 @@ def validate(
         if values
     )
     baseline = next((c for c in cards if c.name == "taux de base"), None)
-    per_match_rps = [
-        ranked_probability_score(f, o)
-        for f, o in zip(forecasts["dixon-coles réglé"], outcomes, strict=True)
-    ]
-    interval = block_bootstrap_interval(per_match_rps) if per_match_rps else None
+
+    def per_match(name: str) -> list[float]:
+        return [
+            ranked_probability_score(f, o)
+            for f, o in zip(forecasts[name], outcomes, strict=True)
+        ]
+
+    reference_scores = per_match(reference.name)
+    interval = block_bootstrap_interval(reference_scores) if reference_scores else None
 
     ablations: tuple[AblationResult, ...] = ()
-    if ablate and baseline is not None:
+    if ablate:
         by_name = {c.name: c for c in cards}
-        tuned_card = by_name.get("dixon-coles réglé")
+        # Each pair names the run that *has* the component and the run that
+        # lacks it.  For the two tuning pairs the reference is the one *without*
+        # tuning, so the names are the other way round — getting that backwards
+        # once made "tuning helps" out of a result that said the opposite.
+        pairs = (
+            ("correction bas scores (rho)", reference.name, "sans correction bas scores",
+             "low_score_correction"),
+            ("décroissance temporelle", reference.name, "sans décroissance temporelle",
+             "half_life_days"),
+            ("régularisation (ridge)", reference.name, "sans régularisation", "ridge"),
+            ("réglage chronologique de la demi-vie", "réglé (demi-vie)", reference.name,
+             "half_life_days (réglé vs fixe)"),
+            ("réglage chronologique du ridge", "réglé (régularisation)", reference.name,
+             "ridge (réglé vs fixe)"),
+            ("modèle d'équipes", reference.name, "taux de base", "modèle complet"),
+        )
         results: list[AblationResult] = []
-        if tuned_card and "poisson" in by_name:
+        for label, with_name, without_name, knob in pairs:
+            if with_name not in by_name or without_name not in by_name:
+                continue
+            with_scores = per_match(with_name)
+            without_scores = per_match(without_name)
             results.append(
                 AblationResult(
-                    "correction bas scores (Dixon-Coles)",
-                    tuned_card.rps,
-                    by_name["poisson"].rps,
+                    component=label,
+                    varied=(knob,),
+                    rps_with=by_name[with_name].rps,
+                    rps_without=by_name[without_name].rps,
+                    difference_interval=paired_difference_interval(
+                        with_scores, without_scores
+                    ),
+                    paired_differences=tuple(
+                        b - a for a, b in zip(with_scores, without_scores, strict=True)
+                    ),
                 )
-            )
-        if tuned_card and "dixon-coles fixe" in by_name:
-            results.append(
-                AblationResult(
-                    "réglage chronologique des paramètres",
-                    tuned_card.rps,
-                    by_name["dixon-coles fixe"].rps,
-                )
-            )
-        if tuned_card:
-            results.append(
-                AblationResult("modèle d'équipes (vs taux de base)", tuned_card.rps, baseline.rps)
             )
         ablations = tuple(results)
 

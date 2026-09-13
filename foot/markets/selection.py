@@ -37,18 +37,53 @@ __all__ = [
     "DecisionStatus",
     "RankingCriteria",
     "Scenario",
+    "ScenarioKind",
     "ScoredOffer",
     "select_best",
 ]
 
 
+class ScenarioKind(Enum):
+    """Why an alternative picture is being considered — three different things.
+
+    Conflating them overstates what the analysis has shown.  A fixed ±15 % shift
+    is a *sensitivity* probe: it says how fragile a price is to an assumption,
+    not that the assumption is likely.  Estimation noise is a different animal,
+    derived from how much data actually backs each rating.  And a documented
+    sporting event — a suspension, a confirmed absence — is a third, and the only
+    one that may be described as a credible worst case, because something was
+    actually reported.
+    """
+
+    SENSITIVITY = "sensibilité"
+    """A deliberate, arbitrary perturbation. Says nothing about likelihood."""
+
+    MODEL_UNCERTAINTY = "incertitude d'estimation"
+    """Derived from the effective sample behind the ratings."""
+
+    SPORTING_EVENT = "événement sportif documenté"
+    """Backed by evidence; the only kind that supports a worst-case claim."""
+
+
 @dataclass(frozen=True, slots=True)
 class Scenario:
-    """An alternative sporting picture, used to stress a candidate bet."""
+    """An alternative picture, with the reason it is being considered."""
 
     name: str
     matrix: ScoreMatrix
+    kind: ScenarioKind = ScenarioKind.SENSITIVITY
+    basis: str = ""
+    """What the scenario rests on — required, so none can be silently arbitrary."""
+
+    evidence_keys: tuple[str, ...] = ()
     note: str = ""
+
+    def __post_init__(self) -> None:
+        if self.kind is ScenarioKind.SPORTING_EVENT and not self.evidence_keys:
+            raise ValueError(
+                f"« {self.name} » est présenté comme un événement sportif documenté "
+                f"mais ne cite aucune source"
+            )
 
 
 class Confidence(Enum):
@@ -97,7 +132,19 @@ class RankingCriteria:
     """Common stake at which every market's log growth is compared."""
 
     exclude_families: frozenset[MarketFamily] = frozenset()
-    version: str = "criteres-v1"
+    gate_kinds: frozenset[ScenarioKind] = frozenset(
+        {ScenarioKind.SENSITIVITY, ScenarioKind.SPORTING_EVENT}
+    )
+    """Scenario kinds allowed to *reject* a bet.
+
+    Estimation noise is deliberately excluded: it is a two-sided band around the
+    estimate, not an adverse event, and using it as a floor would reject every
+    market on any realistic sample while pretending the rejection was about
+    football.  It is measured and reported instead — see
+    :attr:`ScoredOffer.uncertainty_range`.
+    """
+
+    version: str = "criteres-v2"
     declared_at: dt.datetime = field(default_factory=utcnow)
 
     def describe(self) -> str:
@@ -114,13 +161,17 @@ class RankingCriteria:
 
 @dataclass(frozen=True, slots=True)
 class ScoredOffer:
-    """A priced offer with its robustness and its rank score."""
+    """A priced offer with its stress results and its rank score."""
 
     priced: PricedOffer
     worst_case_value: float | None
     worst_case_scenario: str
-    log_growth: float | None
-    passed: bool
+    worst_case_kind: ScenarioKind | None = None
+    uncertainty_range: tuple[float, float] | None = None
+    """Expected value under ±1 σ of estimation noise — reported, never a filter."""
+
+    log_growth: float | None = None
+    passed: bool = False
     rejection: str = ""
 
     @property
@@ -155,6 +206,14 @@ class Decision:
     cancellation: str = ""
     price_condition: str = ""
     reason: str = ""
+    compared: tuple[str, ...] = ()
+    """Labels of the priced markets actually put in competition.
+
+    An unpriced market cannot be compared, so naming what *was* compared stops a
+    reader assuming the whole catalogue was weighed when only part of it carried
+    a price.
+    """
+
     alternatives: tuple[tuple[str, str], ...] = ()
     """``(déclencheur, repli)`` — an alternative only earns its place if it
     answers a stated change in price, risk or scenario."""
@@ -198,7 +257,12 @@ def _confidence_for(
     model_converged: bool,
     contradictions: int,
 ) -> Confidence:
-    """Grade the *foundation* of the pick, deliberately ignoring its probability."""
+    """Grade the *foundation* of the pick, deliberately ignoring its probability.
+
+    Grade D means "information insuffisante pour engager".  A recommendation
+    carrying it would contradict its own diagnosis, so :func:`select_best`
+    declines rather than publishing both.
+    """
     if not model_converged or best.expected_value is None:
         return Confidence.D
     worst = best.worst_case_value if best.worst_case_value is not None else -1.0
@@ -233,12 +297,30 @@ def select_best(
             confidence but never the probability.
         sport_angle: the sporting read, used when no price is available.
     """
+    if not model_converged:
+        # A model that did not converge has no usable probabilities, so nothing
+        # downstream of it can be recommended — whatever the prices say.
+        return Decision(
+            status=DecisionStatus.BLOCKED,
+            criteria=criteria,
+            confidence=Confidence.D,
+            reason=(
+                "le modèle n'a pas convergé : aucune probabilité exploitable, "
+                "donc aucune recommandation"
+            ),
+            rationale=sport_angle,
+        )
+
     quoted = [p for p in priced if p.has_price]
     if not quoted:
         best_model = max(priced, key=lambda p: p.win_probability, default=None)
         condition = ""
         if best_model is not None and math.isfinite(best_model.fair_odds):
-            required = best_model.fair_odds * (1.0 + criteria.min_expected_value)
+            # Solved on the settlement profile: scaling the break-even price is
+            # wrong as soon as the market can refund.
+            required = best_model.profile.odds_for_expected_value(
+                criteria.min_expected_value
+            )
             condition = (
                 f"{best_model.offer.label} : équitable à {best_model.fair_odds:.2f}, "
                 f"intéressant à partir de {required:.2f} "
@@ -259,11 +341,19 @@ def select_best(
         assert item.offer.odds is not None
         value = item.expected_value
         worst, worst_name = value, "estimation centrale"
+        worst_kind: ScenarioKind | None = None
+        band: list[float] = []
         for scenario in scenarios:
             stressed = price_offer(item.offer, scenario.matrix)
             candidate = stressed.expected_value(item.offer.odds)
+            if scenario.kind is ScenarioKind.MODEL_UNCERTAINTY:
+                band.append(candidate)
+                continue
+            if scenario.kind not in criteria.gate_kinds:
+                continue
             if worst is None or candidate < worst:
-                worst, worst_name = candidate, scenario.name
+                worst, worst_name, worst_kind = candidate, scenario.name, scenario.kind
+        uncertainty = (min(band), max(band)) if band else None
         growth = item.log_growth(criteria.reference_stake)
 
         rejection = ""
@@ -276,7 +366,7 @@ def select_best(
         elif value is None or value < criteria.min_expected_value:
             rejection = f"EV {0.0 if value is None else value:+.2%} sous le seuil"
         elif worst is not None and worst < criteria.min_worst_case_value:
-            rejection = f"fragile : {worst:+.2%} en scénario {worst_name}"
+            rejection = f"fragile : {worst:+.2%} en sensibilité « {worst_name} »"
         elif item.win_probability < criteria.min_win_probability:
             rejection = f"probabilité {item.win_probability:.1%} sous le plancher"
 
@@ -285,6 +375,8 @@ def select_best(
                 priced=item,
                 worst_case_value=worst,
                 worst_case_scenario=worst_name,
+                worst_case_kind=worst_kind,
+                uncertainty_range=uncertainty,
                 log_growth=growth,
                 passed=not rejection,
                 rejection=rejection,
@@ -314,6 +406,7 @@ def select_best(
             confidence=Confidence.D,
             reason=reason,
             rationale=sport_angle,
+            compared=tuple(s.offer.label for s in scored),
         )
 
     survivors.sort(key=lambda s: -(s.log_growth if s.log_growth is not None else -math.inf))
@@ -335,11 +428,32 @@ def select_best(
             trigger = "si le scénario défensif se confirme (compositions prudentes)"
         alternatives.append((trigger, other.offer.label))
 
+    compared = tuple(s.offer.label for s in scored)
+    if confidence is Confidence.D:
+        # The grade says the dossier cannot support a stake; publishing a
+        # recommendation alongside it would contradict the diagnosis.
+        return Decision(
+            status=DecisionStatus.NO_BET,
+            criteria=criteria,
+            rejected=rejected[:6],
+            confidence=Confidence.D,
+            reason=(
+                f"le prix de {best.offer.label} passerait les seuils, mais le "
+                f"dossier est noté D (information insuffisante pour engager) : "
+                f"aucune recommandation n'est émise"
+            ),
+            rationale=_dominance(best, others),
+            compared=compared,
+        )
+
+    kind = best.worst_case_kind
+    label = kind.value if kind is not None else "estimation centrale"
     worst_text = (
-        f"{best.worst_case_value:+.2%} dans le scénario « {best.worst_case_scenario} »"
+        f"{best.worst_case_value:+.2%} sous « {best.worst_case_scenario} » ({label})"
         if best.worst_case_value is not None
         else "non évalué"
     )
+    threshold = best.priced.profile.odds_for_expected_value(criteria.min_expected_value)
     return Decision(
         status=DecisionStatus.RECOMMENDED,
         criteria=criteria,
@@ -348,11 +462,21 @@ def select_best(
         rejected=rejected[:6],
         confidence=confidence,
         rationale=_dominance(best, others),
-        main_risk=f"espérance en pire scénario : {worst_text}",
+        main_risk=(
+            f"espérance la plus basse en analyse de sensibilité : {worst_text}"
+            + (
+                f" · incertitude d'estimation : "
+                f"[{best.uncertainty_range[0]:+.2%}, {best.uncertainty_range[1]:+.2%}]"
+                if best.uncertainty_range
+                else ""
+            )
+        ),
         cancellation=(
-            "annuler si la cote passe sous "
-            f"{best.priced.fair_odds * (1.0 + criteria.min_expected_value):.2f}, "
-            "ou si une information sportive décisive invalide le dossier scellé"
+            f"annuler si la cote passe sous {threshold:.2f} "
+            f"(seuil résolu sur le profil de règlement exact, remboursements "
+            f"compris), ou si une information sportive décisive invalide le "
+            f"dossier scellé"
         ),
         alternatives=tuple(alternatives),
+        compared=compared,
     )

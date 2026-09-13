@@ -182,10 +182,10 @@ maximum likelihood from the same match log.
 
 ## Verifying it
 
-The claims above are not asserted, they are tested. **204 tests, no dependencies** — including one that reads every import in the package to prove that second claim.
+The claims above are not asserted, they are tested. **242 tests, no dependencies** — including one that reads every import in the package to prove that second claim.
 
 ```console
-$ pytest -q                       # 204 tests, if you have pytest
+$ pytest -q                       # 241 passed, 1 skipped
 $ python3 tests/run_tests.py      # if you have nothing at all
 $ ruff check . && mypy .          # clean under strict settings
 ```

@@ -10,6 +10,7 @@ is an environment fact and not a defect in this code.
 from __future__ import annotations
 
 import tempfile
+import unittest
 
 from foot.collect.base import Capability, CollectionError, ProviderBlockedError, Reachability
 from foot.collect.cache import Cache
@@ -23,8 +24,14 @@ from support import assert_raises
 _SEASON = "2026-27"
 
 
-class _SkipError(Exception):
-    """Raised to mark a test skipped when the network refuses the host."""
+def _skip(reason: str) -> None:
+    """Mark the running test as skipped, for pytest *and* the in-house runner.
+
+    ``unittest.SkipTest`` is the one signal both understand.  Printing a message
+    and returning — the previous approach — made an untested path count as a
+    success, which is precisely what a test suite must never do.
+    """
+    raise unittest.SkipTest(reason)
 
 
 def _provider() -> OpenFootballProvider:
@@ -35,19 +42,15 @@ def _live_or_skip() -> OpenFootballProvider:
     provider = _provider()
     try:
         status = provider.probe(seasons=(_SEASON,))
-    except CollectionError:
-        raise _SkipError("openfootball injoignable") from None
+    except CollectionError as error:
+        _skip(f"openfootball injoignable : {error}")
     if not status.usable:
-        raise _SkipError(f"openfootball injoignable : {status.detail}") from None
+        _skip(f"openfootball injoignable : {status.detail}")
     return provider
 
 
 def test_openfootball_probe_reports_real_coverage() -> None:
-    try:
-        provider = _live_or_skip()
-    except _SkipError as skip:
-        print(f"IGNORÉ : {skip}")
-        return
+    provider = _live_or_skip()
     status = provider.probe(seasons=(_SEASON,))
     assert status.reachability is Reachability.OK
     assert status.capabilities == frozenset({Capability.RESULTS, Capability.FIXTURES})
@@ -57,11 +60,7 @@ def test_openfootball_probe_reports_real_coverage() -> None:
 
 def test_openfootball_parses_the_three_score_shapes_it_really_emits() -> None:
     """The live files mix ``{"ft": [...]}``, a bare ``[h, a]`` and no score at all."""
-    try:
-        provider = _live_or_skip()
-    except _SkipError as skip:
-        print(f"IGNORÉ : {skip}")
-        return
+    provider = _live_or_skip()
     data = provider.season("it.1", _SEASON)
     assert data.played or data.fixtures
     assert len(data.teams) >= 18
@@ -75,11 +74,7 @@ def test_openfootball_parses_the_three_score_shapes_it_really_emits() -> None:
 
 
 def test_openfootball_history_spans_several_seasons() -> None:
-    try:
-        provider = _live_or_skip()
-    except _SkipError as skip:
-        print(f"IGNORÉ : {skip}")
-        return
+    provider = _live_or_skip()
     history, evidence = provider.history("en.1", ["2024-25", "2025-26", _SEASON])
     assert len(history) > 700, len(history)
     assert history.start.year == 2024
@@ -90,11 +85,7 @@ def test_openfootball_history_spans_several_seasons() -> None:
 
 
 def test_the_cache_avoids_a_second_fetch_and_dates_what_it_stores() -> None:
-    try:
-        _live_or_skip()
-    except _SkipError as skip:
-        print(f"IGNORÉ : {skip}")
-        return
+    _live_or_skip()
     directory = tempfile.mkdtemp()
     provider = OpenFootballProvider(Cache(directory, ttl_seconds=3600))
     first = provider.season("fr.1", _SEASON)

@@ -45,6 +45,18 @@ __all__ = [
     "without_market_evidence",
 ]
 
+DEFAULT_RESULT_DELAY = dt.timedelta(days=1)
+"""Delay after a match date before its result is treated as known.
+
+Openfootball and most result archives publish a date without a kickoff time, so
+the exact moment a score became public is unknown.  Treating a result as known
+from the *start* of its own match day is a look-ahead: at midnight nobody knows
+the evening's score.  One day is the conservative reading of "date only" — the
+result is available once the day is over — and it is what
+:func:`result_available_at` applies.  A source that does carry kickoff times can
+narrow it by passing a smaller delay.
+"""
+
 MARKET_EVIDENCE_PREFIXES: tuple[str, ...] = ("cote::", "odds::", "marché::", "market::")
 """Evidence key prefixes that carry price information and never reach the sport phase."""
 
@@ -56,6 +68,19 @@ _MARKET_KEY_TOKENS = frozenset(
         "maxh", "maxd", "maxa", "avgh", "avgd", "avga",
     }
 )
+
+
+def result_available_at(
+    match_date: dt.date,
+    *,
+    tzinfo: dt.tzinfo,
+    delay: dt.timedelta = DEFAULT_RESULT_DELAY,
+) -> dt.datetime:
+    """The instant a result dated ``match_date`` can first be known.
+
+    The analysis cuts on *availability*, never on the match date itself.
+    """
+    return dt.datetime.combine(match_date, dt.time(0, 0), tzinfo=tzinfo) + delay
 
 
 class OddsLeakError(RuntimeError):
@@ -163,17 +188,38 @@ class SportInput:
     evidence: tuple[Evidence, ...] = ()
     competition: str = ""
     notes: tuple[str, ...] = ()
+    knowledge_cutoff: dt.datetime | None = None
+    """Latest instant whose information the dossier is allowed to contain."""
+
+    cutoff_rule: str = ""
+    """How that cutoff was derived, carried into the report."""
 
     def __post_init__(self) -> None:
         if self.as_of.tzinfo is None:
             raise ValueError("as_of doit être horodaté avec un fuseau")
         object.__setattr__(self, "evidence", without_market_evidence(self.evidence))
-        # No match may postdate as_of: that would be tomorrow's news today.
-        late = [m for m in self.history if m.date > self.as_of.date()]
+        if self.knowledge_cutoff is None:
+            object.__setattr__(self, "knowledge_cutoff", self.as_of)
+        if not self.cutoff_rule:
+            object.__setattr__(
+                self,
+                "cutoff_rule",
+                "coupure sur la date de disponibilité de l'information "
+                f"(date du match + {DEFAULT_RESULT_DELAY.days} j), non sur la date du match",
+            )
+        cutoff = self.knowledge_cutoff
+        assert cutoff is not None
+        # The bar is availability, not the match date: a score dated today is
+        # not knowable at midnight today.
+        late = [
+            m
+            for m in self.history
+            if result_available_at(m.date, tzinfo=cutoff.tzinfo or dt.timezone.utc) > cutoff
+        ]
         if late:
             raise ValueError(
-                f"fuite temporelle : {len(late)} matchs postérieurs à as_of "
-                f"({self.as_of.date().isoformat()}), le premier étant {late[0]}"
+                f"fuite temporelle : {len(late)} résultats non disponibles à "
+                f"{cutoff.isoformat()}, le premier étant {late[0]}"
             )
 
     @property
@@ -352,12 +398,30 @@ def build_sport_input(
     evidence: Sequence[Evidence] = (),
     *,
     competition: str = "",
+    result_delay: dt.timedelta = DEFAULT_RESULT_DELAY,
 ) -> SportInput:
-    """Construct the sport phase's input, truncating history at ``as_of``."""
+    """Construct the sport phase's input, cut on **information availability**.
+
+    Results are admitted only once they could have been known.  With date-only
+    sources that means the day after the match, so an analysis run at midnight
+    does not quietly consume that evening's scores.
+    """
+    tzinfo = as_of.tzinfo or dt.timezone.utc
+    known = MatchLog(
+        m
+        for m in history
+        if result_available_at(m.date, tzinfo=tzinfo, delay=result_delay) <= as_of
+    )
     return SportInput(
         fixture=fixture,
-        history=history.before(as_of.date(), inclusive=True),
+        history=known,
         as_of=as_of,
         evidence=tuple(evidence),
         competition=competition,
+        knowledge_cutoff=as_of,
+        cutoff_rule=(
+            f"date de disponibilité = date du match + {result_delay.days} j "
+            f"(sources sans horaire de coup d'envoi) ; coupure au "
+            f"{as_of.strftime('%Y-%m-%d %H:%M %Z')}"
+        ),
     )

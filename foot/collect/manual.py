@@ -16,7 +16,14 @@ import datetime as dt
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from foot.collect.base import Capability, CollectionError, ProviderStatus, Reachability, ResultSet
+from foot.collect.base import (
+    Capability,
+    CollectionError,
+    ProviderStatus,
+    Reachability,
+    ResultSet,
+    SeasonData,
+)
 from foot.data.csv_source import load_matches, load_odds
 from foot.domain import Fixture, MatchLog
 from foot.market.odds import MatchOdds
@@ -34,7 +41,15 @@ class ManualProvider:
         label: how the source should appear in reports.
     """
 
-    __slots__ = ("_fixtures", "_label", "_odds", "_odds_csv", "_results", "_results_csv")
+    __slots__ = (
+        "_competition_key",
+        "_fixtures",
+        "_label",
+        "_odds",
+        "_odds_csv",
+        "_results",
+        "_results_csv",
+    )
 
     def __init__(
         self,
@@ -45,8 +60,10 @@ class ManualProvider:
         fixtures: Sequence[Fixture] = (),
         odds: Mapping[Fixture, MatchOdds] | None = None,
         label: str = "saisie manuelle",
+        competition_key: str = "manuel",
     ) -> None:
         self._label = label
+        self._competition_key = competition_key
         self._results_csv = Path(results_csv) if results_csv else None
         self._odds_csv = Path(odds_csv) if odds_csv else None
         self._results = results
@@ -73,7 +90,36 @@ class ManualProvider:
         return frozenset(caps)
 
     def competitions(self) -> Sequence[str]:
-        return ("manuel",)
+        return (self._competition_key,)
+
+    def season(self, competition: str, season: str = "") -> SeasonData:
+        """Serve the operator's own data through the engine's provider contract.
+
+        Without this the CSV options were advertised but fed nothing: the engine
+        consumes :class:`~foot.collect.base.SeasonSource`, and a provider that
+        cannot answer :meth:`season` is silently skipped.
+        """
+        if competition != self._competition_key:
+            raise CollectionError(
+                f"compétition inconnue pour l'import manuel : {competition!r} "
+                f"(disponible : {self._competition_key})"
+            )
+        matches = self._results
+        if matches is None and self._results_csv is not None:
+            if not self._results_csv.exists():
+                raise CollectionError(f"fichier de résultats introuvable : {self._results_csv}")
+            matches = load_matches(self._results_csv)
+        if matches is None:
+            matches = MatchLog()
+        return SeasonData(
+            competition=self._competition_key,
+            season=season,
+            label=self._label,
+            played=matches,
+            fixtures=self._fixtures,
+            retrieved_at=utcnow(),
+            url=str(self._results_csv) if self._results_csv else "",
+        )
 
     def source(self) -> Source:
         return Source(name=self._label, provider="opérateur", official=False)

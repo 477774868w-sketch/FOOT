@@ -1,5 +1,10 @@
 # Audit du dépôt et correspondance avec les 22 rubriques
 
+> **Révision du 13/09/2026 — suite à la revue indépendante du commit `8813955`.**
+> Les neuf défauts signalés ont été **reproduits sur données de contrôle avant
+> toute correction**, chacun assorti d'un test qui échouait sur la version
+> auditée. Voir la section 7 pour le détail et les chiffres recalculés.
+
 **Branche** `claude/code-masterpiece-o2mbbl` · **commit de départ** `0aa80a2` ·
 **date de l'audit** 2026-09-13.
 
@@ -154,8 +159,8 @@ deux sur le score 2-1 …
 
 ## 5. Défauts trouvés et corrigés pendant les travaux
 
-| Défaut | Détection | Correction |
-|---|---|---|
+| Défaut | Détection | Correction | Test |
+|---|---|---|---|
 | Lignes quart mal tarifées : mélange des **profils** au lieu des résultats unitaires **par case** — espérance juste, variance fausse | contrôle croisé contre `ScoreMatrix` | `markets/pricing.py` ; écart d'espérance vérifié à 1e-16, croissance logarithmique désormais correcte |
 | Alias d'équipe `"losc"` défini deux fois | `ruff F601` | doublon supprimé |
 | Moteur couplé à `OpenFootballProvider` par `isinstance` | tests d'acceptation avec un fournisseur factice | protocole `SeasonSource` ; `SeasonData` déplacé dans le contrat |
@@ -177,3 +182,116 @@ Rien dans le code. Uniquement des accès réseau sortants :
 
 En attendant, `--resultats-csv` et `--cotes-csv` permettent l'**import manuel**,
 documenté comme solution de secours et marqué comme tel dans la traçabilité.
+
+
+---
+
+## 7. Revue indépendante du commit `8813955` — corrections
+
+Les **38 tests** de régression de `tests/test_regression_review.py` échouaient
+sur la version auditée. Ils passent désormais ; ils sont nommés d'après la
+numérotation de la revue (4 pour le point 1, 3 pour le 2, 6 pour le 3, 3 pour
+les points 4 à 7, 10 pour le 8, 3 pour le 9). Les 8 derniers portent sur les
+défauts trouvés **en vérifiant les corrections** (§7.2) : eux aussi ont d'abord
+été écrits pour échouer.
+
+### 7.1 Défauts reproduits, puis corrigés
+
+| # | Défaut reproduit | Correction | Test |
+|---|---|---|---|
+| 1a | Rencontre du 12/09 analysée le 13/09 sans horaire : « Match nul @ 3.40 » recommandé alors qu'aucune rencontre ne figurait au calendrier | `KickoffStatus.UNVERIFIED` ; la tolérance ±3 jours qui glissait silencieusement une date sur une autre est supprimée — date exacte ou rien, avec les rencontres proches signalées comme candidates | `test_r1a_*` |
+| 1b | `build_sport_input()` retenait les scores du jour même avec un `as_of` à minuit | Coupure sur la **date de disponibilité** (date du match + 1 j pour une source sans horaire), pas sur la date du match ; `SportInput.knowledge_cutoff` et `cutoff_rule` sont portés jusqu'au rapport | `test_r1b_*` |
+| 2 | `ManualProvider` et `FootballDataProvider` ne satisfaisaient pas `SeasonSource` : les options CSV n'alimentaient rien. Le moteur figeait le premier fournisseur même en panne | `season()` implémenté sur les deux ; le moteur conserve la **liste ordonnée** et bascule sur le suivant | `test_r2a/b/c` |
+| 3 | Seules les 3 cotes 1–N–2 atteignaient le sélecteur (3 offres sur 36) | Notation `BTTS:oui=`, `TOTAL:+2.5=`, `DC:1N=`, `DNB:1=`, `AH:H:-0.5=`, `TE:H:+1.5=` ; une ligne absente du catalogue est **construite à la demande** ; la fiche nomme les marchés réellement comparés | `test_r3a–f` |
+| 4a | 180 rencontres distinctes → 135 évaluations dont 15 doublons aux dates frontières | Fenêtres **semi-ouvertes** `[coupure, fin)` : 120 évaluations, 0 doublon | `test_r4a` |
+| 4b | L'ablation Dixon-Coles opposait un modèle *réglé* à un Poisson *fixe* : trois paramètres variaient | Chaque ablation déclare `varied` et **une seule** dimension ; une ablation à deux dimensions lève une erreur | `test_r4b` |
+| 4c | Un gain positif suffisait à afficher « apport confirmé » | Verdict fondé sur l'**IC bootstrap par blocs de la différence appariée** ; un IC contenant zéro donne « NON CONFIRMÉ » | `test_r4c` |
+| 5a | « recommandé » possible avec confiance D et `model_converged=False` | Un modèle non convergé renvoie `BLOCKED` ; une confiance D renvoie `NO_BET` | `test_r5a` |
+| 5b | Quatre variations fixes de ±15 % présentées comme une résistance au pire scénario | `ScenarioKind` : **sensibilité** (arbitraire), **incertitude d'estimation** (dérivée de σ ≈ √(2/(m·λ)), rapportée mais **non filtrante**), **événement sportif documenté** (refusé sans source) | `test_r5b/c` |
+| 6 | `cote_équitable × (1 + EV_min)` : 1,67 au lieu de 1,70 sur 40 %/35 %/25 %, soit +1,95 % d'EV réelle au lieu de +3 % | `SettlementProfile.odds_for_expected_value()` inverse exactement l'affine ; utilisé aussi par la condition d'annulation | `test_r6_*` |
+| 7 | Le dossier était scellé avec `evidence` vide alors que des constats citaient des sources | Les preuves du jeu de données (URL, date du fait, date de relevé) traversent `build_sport_input` jusqu'au dossier scellé et au rapport | `test_r7a–d` |
+| 8 | Protocole absent du dépôt ; chargeur non raccordé | `protocole/protocole-22-rubriques.{md,json}` ; `EngineConfig.rubrics_path` et `--protocole` ; chaque rubrique déclare **donnée / traitement / effet** et son état d'implémentation | `test_r8a–j` |
+| 9 | Un test réseau imprimait « IGNORÉ » puis retournait : compté comme réussi | `unittest.SkipTest` (compris par pytest et par le lanceur maison) ; `Summary` compte **séparément** réussites, échecs et ignorés | `test_r9_*` |
+
+### 7.2 Défauts trouvés en corrigeant
+
+| Défaut | Détection | Correction | Test |
+|---|---|---|---|
+| Le jeu de contrôle des tests était dégénéré (scores parfaitement séparables) : la vraisemblance n'avait pas de maximum intérieur et le modèle ne convergeait pas — ce que l'ancien code masquait en recommandant quand même | le nouveau garde-fou de convergence a refusé le jeu | jeu de contrôle régénéré avec une variété réaliste de scores, ensemencé donc reproductible | `test_r5a` |
+| L'étiquette « réglage de la demi-vie → apport confirmé » signifiait en réalité que la référence battait le réglage : les rôles *avec* / *sans* étaient inversés | lecture de la sortie recalculée | les paires déclarent explicitement quel run porte le composant ; le résultat dit maintenant que le réglage **dégrade** | `test_r4b` |
+| `Summary` en `slots=True` cassait tout chargement dynamique du lanceur | le test de régression du point 9 | `slots` retiré, avec la raison en commentaire | `test_r9_*` |
+| Collision de nom entre le jeu de suppléments et l'offre construite à la demande | mypy | renommage | — |
+| Cotes groupées dans un même champ (`1=1.62 N=4.00 2=5.50 BTTS:oui=1.85`) : seul un jeton par segment `\|` était lu, le bloc restait collé au nom de l'équipe extérieure et une saisie valide devenait « équipe inconnue » | parcours réel `it.1 \| Napoli - Bologna` rejoué après correction | extraction jeton par jeton **à l'intérieur** de chaque champ ; un champ vidé de ses prix est supprimé pour que la forme `@ 2.10 3.40 3.60`, qui doit finir la ligne, reste lisible | `test_r3d/e` |
+| Un marché refusé par conception (corners, cartons, buteurs) faisait remonter `UnsupportedMarketError` depuis l'analyse de ligne, dont le contrat est de ne jamais lever | même parcours | `MatchRequest.refused_markets` : le jeton quitte la ligne et la fiche le **nomme** avec le motif du refus | `test_r3f` |
+| La composition importée renseignait R10 mais n'atteignait pas le plan T−75/T−60 : la même fiche affichait « composition officielle relevée » **et** « aucune composition relevée à ce jour » | parcours réel avec `--compositions-csv` | `record_supplied_lineups()` transforme les feuilles importées en observation réelle et rend un verdict motivé ; R21 est renseignée | `test_r8g` |
+| La grille répondait « fournissez la donnée via `--xg-csv` » alors que le fichier venait d'être fourni mais qu'aucune ligne n'était appariable — une boucle sans issue pour l'opérateur | même parcours | le blocage compte les lignes reçues et dit qu'aucune n'est exploitable, avec la cause probable | `test_r8h` |
+| Contre-analyse figée : « les xG […] sont indisponibles ici » sur une fiche affichant deux sections plus haut un ratio buts/xG, et « donnée qui trancherait : la composition officielle » alors qu'elle était citée | lecture de la fiche produite | le mécanisme d'invalidation, la donnée qui trancherait et l'hypothèse de contexte suivent ce qui a réellement été fourni | `test_r8i` |
+| Chaque constat recevait **toutes** les clés de preuve du dossier : un coefficient d'attaque était « prouvé » par une feuille de composition | lecture de la section 7 de la fiche | les constats du modèle ne citent que les jeux de données dont ils sont issus ; les suppléments se citent eux-mêmes | `test_r7d` |
+| La fiche annonçait « non renseignées faute de source accessible » pour des rubriques sans adaptateur : les trois états étaient reconfondus à l'affichage | lecture de la fiche produite | la section 2 groupe par état et donne pour chacun l'action qui le lèverait | `test_r8j` |
+
+### 7.3 États d'implémentation, distingués précisément
+
+La grille distingue désormais quatre états, et le rapport les affiche :
+
+| Symbole | État | Rubriques ici |
+|---|---|---|
+| ● | opérationnel | R01–R06, R13, R16–R18, R20, R22 |
+| ◐ | opérationnel sur données fournies | R07, R10, R11, R21 — via `--xg-csv`, `--absences-csv`, `--compositions-csv` ; R19 — via les cotes saisies en ligne |
+| ○ | développé mais inaccessible | R15 (arbitre, météo : `foot.collect.footballdata` écrit, hôte bloqué) |
+| · | non développé | R08, R09, R12, R14 — aucun adaptateur n'existe pour les événements détaillés |
+
+Les imports opérateur annoncés dans la grille sont **réellement exposés par la
+CLI** : `test_r8e` échoue si une option déclarée n'existe pas. Vérifié sur
+données réelles (Napoli – Bologna, Serie A 2026-27, `as_of` 13/09/2026 12:00) :
+
+```
+sans import           ✗ indisponible : 9   ✓ traitée : 13   (8 marchés cotés comparés sur 36)
+avec les 3 imports    ✗ indisponible : 5   ✓ traitée : 17   (3 scénarios sportifs documentés)
+```
+
+Une ligne xG portant sur un match absent de l'historique n'est pas comptée comme
+fournie : la grille répond alors « *n* ligne(s) importées, aucune exploitable »,
+et non « fournissez la donnée ».
+
+### 7.4 Performances recalculées
+
+Validation chronologique, Premier League, 790 matchs réels (openfootball,
+saisons 2024-25 à 2026-27), **486 rencontres évaluées hors échantillon** en
+4 plis **disjoints** :
+
+```
+  réglé (régularisation)     RPS=0.21000   skill +8.35%
+  référence                  RPS=0.21040   skill +8.17%
+  sans correction bas scores RPS=0.21052   skill +8.12%
+  sans régularisation        RPS=0.21075   skill +8.02%
+  réglé (demi-vie)           RPS=0.21154   skill +7.67%
+  sans décroissance          RPS=0.21180   skill +7.56%
+  taux de base               RPS=0.22912
+  IC 95% du RPS (bootstrap par blocs) : [0.20094, 0.22104]
+
+  correction bas scores (rho)          gain +0.00012  IC [-0.00023, +0.00041]  NON CONFIRMÉ
+  décroissance temporelle              gain +0.00140  IC [-0.00020, +0.00296]  NON CONFIRMÉ
+  régularisation (ridge)               gain +0.00035  IC [-0.00009, +0.00082]  NON CONFIRMÉ
+  réglage chrono. de la demi-vie       gain -0.00114  IC [-0.00225, -0.00014]  NON CONFIRMÉ
+  réglage chrono. du ridge             gain +0.00040  IC [-0.00026, +0.00103]  NON CONFIRMÉ
+  modèle d'équipes                     gain +0.01872  IC [+0.00830, +0.02921]  apport confirmé
+```
+
+**Lecture.** Un seul composant confirme son apport : le modèle d'équipes. Le
+réglage chronologique de la demi-vie **dégrade** le score, et son intervalle est
+entièrement négatif — c'est un résultat défavorable au système, il est publié
+tel quel. Les chiffres diffèrent de ceux du commit `8813955` (501 évaluations)
+précisément parce que les fenêtres ne se chevauchent plus.
+
+### 7.5 Vérifications
+
+```
+pytest                     241 réussis, 1 ignoré
+python3 tests/run_tests.py 241 réussi(s), 0 échec(s), 1 ignoré(s) sur 242
+ruff check .               propre
+mypy .                     propre, 79 fichiers
+```
+
+Les performances de §7.4 ont été **recalculées après ces corrections** et sont
+identiques au chiffre près : aucune des corrections de cette passe ne touche à
+l'estimation, elles portent sur la saisie, la traçabilité et la restitution.

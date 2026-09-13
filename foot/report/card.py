@@ -14,12 +14,26 @@ from __future__ import annotations
 
 from foot.analysis.dossier import FindingKind
 from foot.analysis.engine import MatchAnalysis
-from foot.analysis.rubrics import RubricStatus
+from foot.analysis.rubrics import RubricImplementation, RubricStatus
 from foot.markets.selection import DecisionStatus
 
 __all__ = ["render_card"]
 
 _WIDTH = 84
+
+_REMEDIES: tuple[tuple[RubricImplementation, str], ...] = (
+    (RubricImplementation.NOT_BUILT, "aucun adaptateur écrit à ce jour"),
+    (
+        RubricImplementation.BUILT_UNREACHABLE,
+        "adaptateur écrit, accès réseau à ouvrir",
+    ),
+    (
+        RubricImplementation.OPERATOR_SUPPLIED,
+        "à fournir par l'opérateur (import CSV)",
+    ),
+    (RubricImplementation.OPERATIONAL, "donnée attendue mais absente de la source"),
+)
+"""Each unavailability state with the action that would actually lift it."""
 
 
 def _rule(char: str = "─") -> str:
@@ -86,11 +100,21 @@ def render_card(analysis: MatchAnalysis, *, detailed: bool = True) -> str:
     for finding in rest:
         lines.append(f"  {finding.statement}")
     if unavailable:
-        lines.append(
-            f"  {len(unavailable)} rubriques non renseignées faute de source accessible :"
-        )
-        for assessment in unavailable[:6]:
-            lines.append(f"    ✗ R{assessment.rubric.number:02d} {assessment.rubric.title}")
+        # Grouped by *why*, because the three states call for three different
+        # actions: wait for development, open a network route, supply a file.
+        by_state: dict[RubricImplementation, list[str]] = {}
+        for assessment in unavailable:
+            by_state.setdefault(assessment.implementation, []).append(
+                f"R{assessment.rubric.number:02d} {assessment.rubric.title}"
+            )
+        lines.append(f"  {len(unavailable)} rubriques non renseignées :")
+        for state, remedy in _REMEDIES:
+            titles = by_state.get(state)
+            if not titles:
+                continue
+            lines.append(f"    {state.value} — {remedy} :")
+            for title in titles[:6]:
+                lines.append(f"      ✗ {title}")
         lines.append(
             "    → aucune valeur n'a été substituée ; l'incertitude du dossier "
             "en tient compte."
@@ -132,21 +156,61 @@ def render_card(analysis: MatchAnalysis, *, detailed: bool = True) -> str:
             lines.append(f"  angle sportif      {decision.rationale}")
 
     # -- 4. Why this market -------------------------------------------------
-    if decision is not None and decision.main is not None:
-        lines.append(_section("4 · POURQUOI CE MARCHÉ"))
-        lines.append(f"  {decision.rationale}")
+    if decision is not None:
+        lines.append(_section("4 · MARCHÉS COTÉS COMPARÉS"))
+        if decision.compared:
+            lines.append(
+                f"  {len(decision.compared)} marché(s) portant un prix ont été mis "
+                f"en concurrence :"
+            )
+            for label in decision.compared:
+                lines.append(f"    · {label}")
+            unpriced = len(analysis.priced) - len(decision.compared)
+            if unpriced > 0:
+                lines.append(
+                    f"  {unpriced} autre(s) offre(s) du catalogue n'ont pas de cote "
+                    f"fournie : elles ne peuvent pas être comparées."
+                )
+        else:
+            lines.append("  aucun marché coté : aucune comparaison de prix possible")
+        for refused in analysis.resolved.request.refused_markets:
+            lines.append(
+                f"  {refused} : cote reçue mais écartée — ce marché ne se déduit pas "
+                f"de la loi des scores finaux ; un modèle dédié est requis et n'est "
+                f"pas fourni ici. Aucune estimation n'a été produite."
+            )
+        if decision.main is not None:
+            lines.append(f"  {decision.rationale}")
         lines.append(f"  {decision.criteria.describe()}")
-        if decision.alternatives:
+        if decision.main is not None and decision.alternatives:
             lines.append("  replis (chacun répond à un changement précis) :")
             for trigger, alternative in decision.alternatives:
                 lines.append(f"    · {trigger} → {alternative}")
-        if decision.rejected:
+        if decision.main is not None and decision.rejected:
             lines.append("  marchés écartés :")
             for rejected in decision.rejected[:4]:
                 lines.append(f"    ✗ {rejected.offer.label} — {rejected.rejection}")
 
     # -- 5. Risk and cancellation ------------------------------------------
-    lines.append(_section("5 · RISQUE ET CONTRE-ANALYSE"))
+    lines.append(_section("5 · RISQUE, SENSIBILITÉ ET CONTRE-ANALYSE"))
+    if analysis.scenarios:
+        kinds: dict[str, list[str]] = {}
+        for scenario in analysis.scenarios:
+            kinds.setdefault(scenario.kind.value, []).append(scenario.name)
+        for kind, names in kinds.items():
+            lines.append(f"  {kind} : {', '.join(names)}")
+        basis = {s.kind.value: s.basis for s in analysis.scenarios if s.basis}
+        for kind, why in basis.items():
+            lines.append(f"    · {kind} — {why}")
+        if not any(
+            s.kind.value == "événement sportif documenté" for s in analysis.scenarios
+        ):
+            lines.append(
+                "  aucun événement sportif documenté n'a pu être intégré : les "
+                "sources de compositions et d'absences sont inaccessibles. Les "
+                "variations ci-dessus mesurent une sensibilité, elles ne "
+                "constituent pas un pire cas sportif établi."
+            )
     if decision is not None and decision.main_risk:
         lines.append(f"  risque principal   {decision.main_risk}")
     if decision is not None and decision.cancellation:

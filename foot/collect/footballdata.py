@@ -24,6 +24,7 @@ from foot.collect.base import (
     ProviderStatus,
     Reachability,
     ResultSet,
+    SeasonData,
 )
 from foot.collect.cache import Cache
 from foot.collect.http import fetch
@@ -174,6 +175,24 @@ class FootballDataProvider:
             ),
             source=source,
             retrieved_at=retrieved_at,  # type: ignore[arg-type]
+        )
+
+    def season(self, competition: str, season: str) -> SeasonData:
+        """Serve the archive through the engine's provider contract.
+
+        The archive holds results only — no forward fixtures — so
+        :attr:`SeasonData.fixtures` is empty and the engine treats any requested
+        match as unverified rather than inventing a calendar entry.
+        """
+        result = self.results(competition, season)
+        return SeasonData(
+            competition=competition,
+            season=season,
+            label=DIVISIONS.get(competition, competition),
+            played=result.matches,
+            fixtures=(),
+            retrieved_at=result.retrieved_at,
+            url=self.url_for(competition, season),
         )
 
     def odds(
