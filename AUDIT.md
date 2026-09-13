@@ -105,7 +105,7 @@ un test) · **🟡 partiel** · **⛔ bloqué par une dépendance externe préci
 | 18 | Scénarios et contre-analyse | ✅ | `engine.py::_scenarios`, `_counter_analysis` | `test_markets_engine.py::test_robustness_uses_the_worst_credible_scenario` |
 | 19 | Comparaison des marchés | ✅ (cotes fournies) | `markets/catalogue.py` (36 offres), `markets/selection.py` | `::test_every_family_matches_a_hand_computed_grid_sum` |
 | 20 | Loi jointe et règlements asiatiques | ✅ | `markets/settlement.py`, `markets/pricing.py` | `::test_a_whole_asian_line_pushes_and_a_quarter_line_half_settles`, `::test_a_same_match_combination_is_an_intersection_not_a_product` |
-| 21 | Compositions probables puis officielles | 🟡 | `analysis/lineups.py` : planification T−75/T−60, révision du dossier | `::test_lineup_plan_is_outstanding_until_something_records_a_check` — **aucun automatisme actif**, et le rapport l'écrit |
+| 21 | Compositions probables puis officielles | 🟡 | `analysis/lineups.py` (plan + révision), `analysis/watch.py` (boucle exécutée), `collect/footballdata_org.py` (adaptateur) | `test_daily_use.py::test_the_watch_retries_until_the_sheet_is_published` — **le contrôle est exécuté par `foot suivre`** ; la source automatique attend une clé, et le rapport le nomme |
 | 22 | Décision, confiance, risque, restitution | ✅ | `report/card.py`, `report/table.py`, `report/web.py` | `::test_the_web_interface_renders_a_full_report` |
 
 **Bilan : 13 rubriques intégrées et vérifiées, 2 partielles, 7 bloquées par une
@@ -585,3 +585,143 @@ python3 tests/run_tests.py --sans-reseau
 ruff check .                 propre
 mypy .                       propre, 85 fichiers
 ```
+
+---
+
+## 11. Usage quotidien depuis le téléphone — travaux à partir de `9cb285f`
+
+Objectif : saisir des rencontres depuis un téléphone et obtenir une analyse
+sourcée puis un marché au prix disponible, **sans préparer de CSV** dans le
+parcours normal.
+
+### 11.1 Ce qui fonctionne automatiquement, aujourd'hui, sans clé
+
+| Fonction | Preuve |
+|---|---|
+| Calendrier, statut et résultats des 5 grands championnats | `foot fournisseurs` : openfootball **OK**, couverture vérifiée `en.1, es.1, de.1, it.1, fr.1` en 2026-27 |
+| Dossier sportif scellé avant toute lecture de cote | empreinte affichée sur chaque fiche, `R03` ✓ |
+| Comparaison des marchés cotés, avec règlement exact | `R19`, `R20` ✓ |
+| Décision, confiance, risque principal, condition d'annulation | `R22` ✓ |
+| **Contrôle T−75/T−60 exécuté**, avec nouvelles tentatives jusqu'au coup d'envoi | `foot suivre` ; `tests/test_daily_use.py` (6 tests) |
+| **Journal des prévisions** en ajout seul, révision distinguée d'une reconduction | `foot journal` ; `tests/test_daily_use.py` (6 tests) |
+| **Accès privé + HTTPS + sauvegarde côté serveur** | `foot web --jeton --certificat --cle --journal` ; 5 tests sur serveur réel |
+| Restitution de **chaque ligne saisie**, ambiguïtés nommées avec la façon de trancher | « Contrôle : chaque ligne saisie apparaît bien ci-dessus. » |
+
+### 11.2 Ce qui attend une activation (code écrit et testé, clé à poser)
+
+| Fonction | Clé | Coût annoncé | Ce que la sonde vérifiera |
+|---|---|---|---|
+| Compositions officielles automatiques (`R10`, `R21`) | `FOOTBALL_DATA_ORG_TOKEN` | gratuit 12 compétitions / 10 req·min ; ≈ 20 €/mois plan « One » | **le plan gratuit ne sert pas les compositions** : la sonde lit la réponse reçue et le dit, plutôt que de croire la documentation |
+| Cotes prématch automatiques (`R19`) | `ODDS_API_KEY` | gratuit 500 req/mois ; ≈ 30 $/mois au-delà | quels bookmakers et quels marchés votre plan renvoie réellement |
+
+Adaptateurs écrits, testés sur **réponses enregistrées** (`tests/test_live_integrations.py`,
+24 tests, sans réseau ni clé). `foot config` affiche les coûts **avant** tout
+engagement ; le logiciel ne souscrit à rien.
+
+### 11.3 Ce qui reste à développer
+
+| Manque | Conséquence | Ce qu'il faudrait |
+|---|---|---|
+| Absences et blessures (`R11`) | rubrique « à fournir par l'opérateur » | adaptateur API-Football — **catalogué volontairement comme non développé**, c'est le premier à écrire |
+| xG, npxG, tirs (`R07`, `R08`, `R09`, `R14`) | 4 rubriques bloquées | même adaptateur, ou une source xG dédiée |
+| Entraîneur et styles (`R12`) | rubrique bloquée | aucune source cataloguée |
+| Météo, pelouse, arbitre (`R15`) | rubrique bloquée | football-data.co.uk sert l'arbitre mais est **injoignable depuis cet environnement** (403 du proxy) |
+
+Aucune de ces rubriques ne produit d'affirmation : le rapport les marque
+indisponibles et nomme, pour chacune, l'action exacte qui la lèverait —
+« clé `FOOTBALL_DATA_ORG_TOKEN` à fournir », « accès réseau à ouvrir »,
+« adaptateur à écrire », ou « donnée à fournir ».
+
+### 11.4 Le parcours complet sur trois rencontres réelles
+
+```console
+$ python3 -m foot analyser --fichier trois.txt --date 2026-09-13T10:00 \
+      --bookmaker Betclic --rubriques --journal --motif "démonstration"
+```
+
+```
+RÉCAPITULATIF — 3 rencontre(s) demandée(s)
+#    Rencontre                           Choix principal            Cote   Prob  EV       Conf  Décision
+1    Manchester Unit – Manchester City   Victoire extérieur (2)     2.65   48%   +26.2%   B     recommandé
+2    SSC Napoli – Bologna FC 1909        Victoire extérieur (2)     5.50   23%   +27.4%   B     recommandé
+3    Levante UD – FC Barcelona           —                          —      —     —        D     aucun pari
+Total : 3 demandée(s) · 3 analysée(s) · 2 recommandation(s) · 0 à préciser
+Contrôle : chaque ligne saisie apparaît bien ci-dessus.
+
+Journal : 3 prévision(s) ajoutée(s) à .foot-journal.jsonl. Rien n'y est jamais réécrit.
+```
+
+Rencontres, cotes et historiques sont réels (openfootball, 790 matchs de Premier
+League et 780 de Serie A). **Ces trois rencontres démontrent le fonctionnement ;
+elles ne constituent en aucun cas une validation des performances.** Aucune cote
+de clôture n'est accessible ici, donc aucun rendement n'est mesurable ; c'est
+précisément ce que le journal sert à préparer.
+
+Couverture effective des 22 rubriques sur ces trois fiches : **13 sur 22 (59 %)**,
+identique pour les trois, la limite étant la même pour toutes — aucune source
+d'absences, de xG ni de compositions n'est active dans cet environnement.
+
+### 11.5 Échecs et données manquantes, tels qu'affichés
+
+```
+# ligne non identifiable — et aucune suggestion fantaisiste
+Ligne 2 : Zorglub - Machin
+  STATUT : analyse non produite
+  équipe inconnue — manque : « Zorglub » et/ou « Machin » introuvables dans
+  les compétitions couvertes (de.1, en.1, es.1, fr.1, it.1)
+
+# nom ambigu : les candidats, et comment trancher
+Ligne 3 : United - City
+  candidats possibles : Leeds United FC, Manchester United FC,
+                        Newcastle United FC, West Ham United FC
+  pour trancher : reprenez le nom complet d'un candidat, ou retirez la date
+  pour laisser le calendrier la fixer.
+
+# rubrique bloquée : le remède exact, pas un mot vague
+✗ ○ R21 Compositions probables puis officielles
+      adaptateur foot.collect.footballdata_org écrit ;
+      compositions : clé à fournir (FOOTBALL_DATA_ORG_TOKEN pour
+      football-data.org) — voir « foot config »
+
+# suivi qui ne trouve rien : c'est une information, pas un silence
+  4 tentative(s)
+  01:03 CEST — aucune composition publiée
+  DERNIÈRE VÉRIFICATION RÉUSSIE : aucune. Les compositions n'ont pas été
+  publiées, ou la source ne les sert pas.
+  arrêt : fin de la fenêtre de contrôle
+```
+
+### 11.6 Deux décisions de conception qu'il faut connaître
+
+**Une feuille de composition est ajoutée entière, jamais fusionnée joueur par
+joueur.** Mélanger les onze d'une source avec ceux d'une autre fabriquerait une
+composition que personne n'a publiée. À heure de publication égale, la saisie de
+l'opérateur tient ; une feuille réellement postérieure la remplace, et la
+précédente reste visible comme version remplacée.
+
+**Une suggestion doit ressembler à ce qui a été tapé.** Le seuil des
+suggestions passe de 0,45 à 0,55 : à 0,45, « Machin » proposait Milan, Monaco et
+Manchester City, ce qui, sur un téléphone, invite à choisir l'une des trois. À
+0,55, une vraie faute de frappe trouve toujours son club (« Napli » → SSC
+Napoli, « Bayrn Munich » → Bayern München) et un nom qui ne ressemble à rien ne
+propose rien. Le seuil de *résolution*, lui, n'a pas bougé.
+
+**Une prévision reconduite n'est pas une révision.** Le dossier est daté : son
+empreinte change à chaque relecture, même quand rien d'autre ne change. Le
+journal compare donc la **substance** — probabilités, marché retenu, cote,
+confiance — et écrit « inchangé » quand c'est le cas. Sans cela, un contrôle de
+routine à T−60 se serait lu comme un changement d'avis.
+
+### 11.7 Vérifications
+
+```
+pytest -m "not network"      347 réussis, 1 ignoré
+python3 tests/run_tests.py --sans-reseau
+                             347 réussi(s), 0 échec(s), 1 ignoré(s) sur 348
+ruff check .                 propre
+mypy .                       propre, 93 fichiers
+protocole synchronisé        protocole/protocole-22-rubriques.json == dump_rubrics()
+```
+
+43 tests ajoutés (`tests/test_live_integrations.py`, `tests/test_daily_use.py`),
+tous hors réseau et sans clé.

@@ -36,6 +36,7 @@ from test_acceptance import _COMP, StubProvider, _controlled_history
 from foot.analysis.engine import Engine, EngineConfig
 from foot.analysis.journey import run_journey
 from foot.analysis.ledgerbook import Forecast, ForecastBook, record_run
+from foot.analysis.naming import TeamIndex
 from foot.analysis.watch import WatchPlan, due_soon, watch_until_kickoff
 from foot.collect.base import Capability, LineupSource
 from foot.collect.footballdata_org import CREDENTIAL
@@ -600,3 +601,30 @@ def test_a_price_from_another_book_stays_labelled_all_the_way_to_the_card() -> N
     card = render_card(result.run.analyses[0])
     if "PARI PRINCIPAL" in card:
         assert "≠ Betclic demandé" in card
+
+
+# --------------------------------------------------------------------------- #
+# 6. Une suggestion doit ressembler à ce qui a été tapé
+# --------------------------------------------------------------------------- #
+
+
+def test_a_typo_still_finds_its_club() -> None:
+    index = TeamIndex(
+        ["SSC Napoli", "Bayern München", "Manchester United FC", "AC Milan", "AS Monaco"]
+    )
+    for typed, expected in (
+        ("Napli", "SSC Napoli"),
+        ("Bayrn Munich", "Bayern München"),
+        ("Manchster United", "Manchester United FC"),
+    ):
+        match = index.resolve(typed)
+        found = match.name or (match.candidates[0] if match.candidates else "")
+        assert found == expected, f"{typed} → {found}"
+
+
+def test_a_name_that_resembles_nothing_suggests_nothing() -> None:
+    """Proposer Milan pour « Machin » invite à choisir un mauvais match."""
+    index = TeamIndex(["SSC Napoli", "AC Milan", "AS Monaco", "Manchester City FC"])
+    match = index.resolve("Machin")
+    assert not match.resolved
+    assert match.candidates == (), match.candidates

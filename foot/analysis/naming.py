@@ -171,7 +171,13 @@ class TeamIndex:
 
         close = difflib.get_close_matches(target, self._normals, n=3, cutoff=cutoff)
         if not close:
-            suggestions = difflib.get_close_matches(target, self._normals, n=3, cutoff=0.45)
+            # Looser than the resolution cutoff — a suggestion costs nothing —
+            # but not so loose that it suggests a club the typed name does not
+            # resemble at all. At 0.45, « Machin » proposed Milan, Monaco and
+            # Manchester City; on a phone that is an invitation to pick one of
+            # them. At 0.55 a real typo still lands (« Napli » → SSC Napoli,
+            # « Bayrn Munich » → Bayern München) and nonsense suggests nothing.
+            suggestions = difflib.get_close_matches(target, self._normals, n=3, cutoff=0.55)
             return NameMatch(
                 query,
                 NameResolution.UNKNOWN,

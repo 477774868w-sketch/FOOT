@@ -5,12 +5,17 @@ A rigorous football (soccer) modelling engine in pure Python. **No dependencies.
 > **Système d'analyse de rencontres (français)** — collecte réelle, dossier
 > sportif scellé avant lecture des cotes, grille des 22 rubriques, comparaison
 > des marchés et une décision par rencontre :
-> **[GUIDE.md](GUIDE.md)** pour l'utilisation, **[AUDIT.md](AUDIT.md)** pour la
-> correspondance avec le protocole et l'état vérifié des fournisseurs.
+> **[TELEPHONE.md](TELEPHONE.md)** pour le parcours depuis un téléphone, une
+> page ; **[GUIDE.md](GUIDE.md)** pour l'utilisation complète ;
+> **[AUDIT.md](AUDIT.md)** pour la correspondance avec le protocole, l'état
+> vérifié des fournisseurs, et ce qui fonctionne / attend une clé / reste à
+> développer.
 >
 > ```console
-> $ python3 -m foot web          # interface en français
+> $ python3 -m foot web --jeton --journal   # interface privée, analyses conservées
 > $ python3 -m foot analyser "it.1 | Napoli - Bologna | 1.62 4.00 5.50"
+> $ python3 -m foot suivre "…" --coup-denvoi 2026-09-13T20:45  # contrôle T−75/T−60
+> $ python3 -m foot config       # quelles clés sont posées, et ce qu'elles coûtent
 > ```
 
 `foot` fits Dixon-Coles and Poisson goal models by maximum likelihood with
