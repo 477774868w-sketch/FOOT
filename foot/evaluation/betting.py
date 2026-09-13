@@ -218,17 +218,31 @@ def simulate_betting(
             )
             curve.append(bankroll)
             if bankroll <= 0.0:  # ruin: stop rather than simulate negative stakes
-                return _finish(bets, curve, starting_bankroll, bankroll, turnover,
-                               kelly_fraction, minimum_edge)
+                return _finish(
+                    bets,
+                    curve,
+                    starting_bankroll=starting_bankroll,
+                    bankroll=bankroll,
+                    turnover=turnover,
+                    kelly_fraction=kelly_fraction,
+                    minimum_edge=minimum_edge,
+                )
 
     return _finish(
-        bets, curve, starting_bankroll, bankroll, turnover, kelly_fraction, minimum_edge
+        bets,
+        curve,
+        starting_bankroll=starting_bankroll,
+        bankroll=bankroll,
+        turnover=turnover,
+        kelly_fraction=kelly_fraction,
+        minimum_edge=minimum_edge,
     )
 
 
 def _finish(
     bets: Sequence[Bet],
     curve: Sequence[float],
+    *,
     starting_bankroll: float,
     bankroll: float,
     turnover: float,

@@ -401,6 +401,23 @@ et vérification que le protocole stocké correspond au code) et un job **résea
 informatif** (`continue-on-error`), parce qu'un hôte injoignable est un fait
 d'environnement et non un défaut du code.
 
+**Un défaut de la CI trouvé par la CI.** Le premier passage du workflow a échoué
+sur `ruff` : installé sans version épinglée, il avait stabilisé `PLR0917` (trop
+d'arguments positionnels) depuis la version locale. Une vérification qui change
+de verdict sans qu'une ligne de code ne bouge ne dit rien sur le code. Deux
+corrections :
+
+- les quatre signatures signalées sont passées en **arguments par mot-clé** —
+  la règle avait raison sur le fond : un appel à neuf arguments positionnels
+  s'inverse sans bruit ;
+- `pytest`, `ruff` et `mypy` sont désormais **épinglés** dans le workflow, aux
+  versions contre lesquelles ces chiffres ont été obtenus. Mettre à jour un
+  outil devient un changement délibéré.
+
+Le job **réseau a réussi sur GitHub Actions**, là où `football-data.co.uk` est
+bloqué dans l'environnement de développement : le blocage constaté ici ne décrit
+donc pas l'environnement d'exécution final, comme la revue l'avait noté.
+
 ### 8.7 Ce qui reste à développer
 
 Ces points relèvent de la **seconde livraison** annoncée par la revue. Ils sont

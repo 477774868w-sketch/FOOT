@@ -151,10 +151,10 @@ def _strong_wolfe(
     objective: ObjectiveWithGradient,
     x: Sequence[float],
     direction: Sequence[float],
+    *,
     f0: float,
     g0: Sequence[float],
     alpha_init: float,
-    *,
     c1: float,
     c2: float,
     max_evaluations: int,
@@ -307,8 +307,15 @@ def minimize_with_gradient(
             alpha_init = min(1.0, 1.0 / scale) if scale > 0.0 else 1.0
 
         search = _strong_wolfe(
-            objective, x, direction, value, grad, alpha_init,
-            c1=c1, c2=c2, max_evaluations=max_evaluations - evaluations,
+            objective,
+            x,
+            direction,
+            f0=value,
+            g0=grad,
+            alpha_init=alpha_init,
+            c1=c1,
+            c2=c2,
+            max_evaluations=max_evaluations - evaluations,
         )
         evaluations += search.evaluations
         if not search.ok:

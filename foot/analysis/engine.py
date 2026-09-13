@@ -330,8 +330,15 @@ class Engine:
             inline = request.odds or (odds or {}).get(request.line_number)
             analyses.append(
                 self._analyse_one(
-                    resolved, histories, instant, report, inline, bookmaker, quoted_at,
-                    dict(request.quotes), supplements or SupplementSet(),
+                    resolved,
+                    histories=histories,
+                    as_of=instant,
+                    report=report,
+                    odds=inline,
+                    bookmaker=bookmaker,
+                    quoted_at=quoted_at,
+                    quotes=dict(request.quotes),
+                    supplements=supplements or SupplementSet(),
                 )
             )
         return AnalysisRun(
@@ -578,6 +585,7 @@ class Engine:
     def _analyse_one(
         self,
         resolved: ResolvedMatch,
+        *,
         histories: Mapping[str, MatchLog],
         as_of: dt.datetime,
         report: RegistryReport,
@@ -1098,6 +1106,7 @@ class Engine:
             a: float,
             kind: ScenarioKind,
             basis: str,
+            *,
             note: str = "",
             evidence_keys: tuple[str, ...] = (),
         ) -> Scenario:

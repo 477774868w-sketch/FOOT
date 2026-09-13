@@ -26,8 +26,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Outils de vérification
-        run: python -m pip install --upgrade pip pytest ruff mypy
+      - name: Outils de vérification (versions épinglées)
+        # Épinglées volontairement : sans cela, une nouvelle règle de ruff ou une
+        # inférence plus stricte de mypy fait échouer une branche dont pas une
+        # ligne n'a changé. Une vérification qui n'est pas reproductible ne dit
+        # rien sur le code. La mise à jour devient un changement délibéré.
+        run: python -m pip install --upgrade pip "pytest==9.0.2" "ruff==0.15.8" "mypy==1.19.1"
 
       - name: Lanceur sans aucune dépendance
         # Passe en premier : si la suite exige pytest pour tourner, la promesse
@@ -67,7 +71,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: python -m pip install --upgrade pip pytest
+      - run: python -m pip install --upgrade pip "pytest==9.0.2"
 
       - name: pytest -m network
         # -rs affiche le motif de chaque test ignoré : un test qui ne s'exécute

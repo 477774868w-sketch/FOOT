@@ -39,6 +39,12 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# Les règles en préversion ne sont PAS activées : elles changent d'une version à
+# l'autre, et une vérification qui bouge toute seule ne dit rien sur le code.
+# C'est pourquoi la CI épingle sa version de ruff (voir le workflow) : une mise à
+# jour d'outil devient alors un changement délibéré, pas une panne surprise.
+# PLR0917, stabilisée entre-temps, avait fait échouer une branche inchangée ;
+# les signatures concernées ont été corrigées sur le fond, en mots-clés.
 
 [tool.ruff.lint.isort]
 known-first-party = ["foot"]
