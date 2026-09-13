@@ -723,13 +723,15 @@ routine à T−60 se serait lu comme un changement d'avis.
 ### 11.7 Vérifications
 
 ```
-pytest -m "not network"      347 réussis, 1 ignoré
+pytest -m "not network"      349 réussis, 1 ignoré
+pytest -m "network"          8 réussis (GitHub Actions ; bloqués dans cet
+                             environnement, dont l'AUDIT §2 dit pourquoi)
 python3 tests/run_tests.py --sans-reseau
-                             347 réussi(s), 0 échec(s), 1 ignoré(s) sur 348
+                             349 réussi(s), 0 échec(s), 1 ignoré(s) sur 350
 ruff check .                 propre
 mypy .                       propre, 93 fichiers
 protocole synchronisé        protocole/protocole-22-rubriques.json == dump_rubrics()
 ```
 
-43 tests ajoutés (`tests/test_live_integrations.py`, `tests/test_daily_use.py`),
+54 tests ajoutés (`tests/test_live_integrations.py`, `tests/test_daily_use.py`),
 tous hors réseau et sans clé.
