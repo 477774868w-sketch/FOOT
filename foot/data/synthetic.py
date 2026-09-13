@@ -24,7 +24,21 @@ from foot.models.dixon_coles import dixon_coles_tau
 if TYPE_CHECKING:
     from foot.market.odds import MatchOdds
 
-__all__ = ["LeagueTruth", "round_robin_schedule", "synthetic_league", "synthetic_odds"]
+__all__ = [
+    "SYNTHETIC_MARKER",
+    "LeagueTruth",
+    "round_robin_schedule",
+    "synthetic_league",
+    "synthetic_odds",
+]
+
+SYNTHETIC_MARKER = "[SYNTHÉTIQUE] Ligue de démonstration"
+"""Stamped into every synthetic competition label.
+
+Synthetic data is for demonstrations and tests.  Marking it at the source means
+the analysis engine can refuse it in real mode by inspection, rather than
+relying on the caller to remember which dataset they loaded.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +142,7 @@ def synthetic_league(
     defence_spread: float = 0.28,
     home_advantage: float = 0.26,
     rho: float = -0.06,
-    competition: str = "Synthetic League",
+    competition: str = SYNTHETIC_MARKER,
 ) -> tuple[MatchLog, LeagueTruth]:
     """Generate a league whose true parameters are known exactly.
 

@@ -2,6 +2,17 @@
 
 A rigorous football (soccer) modelling engine in pure Python. **No dependencies.**
 
+> **Système d'analyse de rencontres (français)** — collecte réelle, dossier
+> sportif scellé avant lecture des cotes, grille des 22 rubriques, comparaison
+> des marchés et une décision par rencontre :
+> **[GUIDE.md](GUIDE.md)** pour l'utilisation, **[AUDIT.md](AUDIT.md)** pour la
+> correspondance avec le protocole et l'état vérifié des fournisseurs.
+>
+> ```console
+> $ python3 -m foot web          # interface en français
+> $ python3 -m foot analyser "it.1 | Napoli - Bologna | 1.62 4.00 5.50"
+> ```
+
 `foot` fits Dixon-Coles and Poisson goal models by maximum likelihood with
 hand-derived analytic gradients, rates teams with Elo, reads the betting market,
 sizes bets with the Kelly criterion, backtests without look-ahead leakage and
@@ -128,10 +139,20 @@ conjugate gives the algebraically identical
 p_i = 2π_i² / (B · (√(z² + 4(1−z)π_i²/B) + z))
 ```
 
-— a ratio of well-scaled quantities across the whole range. The root always
-exists for genuine decimal odds: at *z* = 0 the implied total is `√B ≥ 1`, and as
-*z* → 1 it tends to `Σπ² / B`, which is strictly below 1 because every `π_i < 1`
-forces `Σπ² < Σπ = B`. Bisection therefore cannot fail.
+— a ratio of well-scaled quantities across the whole range.
+
+**Where the root exists.** Bisection is guaranteed only on a book that carries a
+margin, `B = Σ 1/odds ≥ 1`. There, at *z* = 0 the implied total is `√B ≥ 1`, and
+as *z* → 1 it tends to `Σπ² / B`, which is strictly below 1 because every
+`π_i < 1` forces `Σπ² < Σπ = B`; the total is continuous in between, so a root
+exists. **When `B < 1` — an arbitrage book such as 3.50 / 3.50 / 3.50, where
+`B = 0.857` — there is no such root**, because `√B < 1` already. The code does
+not attempt one: `shin_insider_fraction` returns `z = 0` for `B ≤ 1`, which
+reduces Shin to plain normalisation. An earlier edition of this README claimed
+existence "for genuine decimal odds" without that condition; the claim was too
+broad, the implementation was always correct, and
+`test_market.py::test_shin_has_no_root_on_an_arbitrage_book` now pins the
+behaviour.
 
 ### Simultaneous Kelly
 
@@ -161,10 +182,10 @@ maximum likelihood from the same match log.
 
 ## Verifying it
 
-The claims above are not asserted, they are tested. **148 tests, no dependencies** — including one that reads every import in the package to prove that second claim.
+The claims above are not asserted, they are tested. **204 tests, no dependencies** — including one that reads every import in the package to prove that second claim.
 
 ```console
-$ pytest -q                       # if you have pytest
+$ pytest -q                       # 204 tests, if you have pytest
 $ python3 tests/run_tests.py      # if you have nothing at all
 $ ruff check . && mypy .          # clean under strict settings
 ```

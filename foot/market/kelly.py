@@ -42,11 +42,21 @@ from foot.market.odds import MatchOdds
 
 __all__ = [
     "KellyAllocation",
+    "NotMutuallyExclusiveError",
     "expected_log_growth",
     "expected_value",
     "kelly_fraction",
     "kelly_portfolio",
 ]
+
+
+class NotMutuallyExclusiveError(ValueError):
+    """The outcomes passed to a simultaneous-Kelly routine can co-occur.
+
+    Raised instead of a generic message because the mistake it catches — sizing
+    overlapping bets as if only one could win — is silent, plausible-looking and
+    expensive.
+    """
 
 
 def expected_value(probability: float, decimal_odds: float) -> float:
@@ -141,6 +151,11 @@ def kelly_portfolio(
 ) -> KellyAllocation:
     """Exact simultaneous Kelly stakes for a mutually exclusive market.
 
+    The outcomes must be **mutually exclusive and collectively exhaustive** —
+    the three results of one match, not a basket of bets that can win together.
+    Passing overlapping selections raises
+    :class:`NotMutuallyExclusiveError` rather than silently over-staking.
+
     Args:
         probabilities: your probabilities; must sum to one.
         odds: decimal odds for the same outcomes, in the same order.
@@ -169,8 +184,22 @@ def kelly_portfolio(
     for o in prices:
         if not math.isfinite(o) or o <= 1.0:
             raise ValueError(f"decimal odds must exceed 1, got {o!r}")
-    if abs(math.fsum(probs) - 1.0) > 1e-6:
-        raise ValueError(f"probabilities must sum to 1, got {math.fsum(probs)!r}")
+    # Mutual exclusivity is a *precondition of the formula*, not a formatting
+    # rule.  The closed form below assumes exactly one outcome can occur, so
+    # applying it to overlapping bets — "home win" and "over 2.5", say — would
+    # over-stake badly.  Summing to one is the strongest check available from
+    # the arguments alone, and it is stated as such rather than left implicit:
+    # a caller whose probabilities happen to sum to one by coincidence is told
+    # here what the function actually requires.
+    total = math.fsum(probs)
+    if abs(total - 1.0) > 1e-6:
+        raise NotMutuallyExclusiveError(
+            f"kelly_portfolio requires mutually exclusive, collectively exhaustive "
+            f"outcomes whose probabilities sum to 1; got {total!r}. Overlapping bets "
+            f"(such as a match result and a totals line on the same game) are not "
+            f"a portfolio of exclusive outcomes and must not be sized with this "
+            f"function — see foot.markets for same-match combinations."
+        )
 
     # Walk down the outcomes in decreasing order of p*o, adding an outcome only
     # if it beats the reserve implied by the set accepted *so far*.  Testing

@@ -12,8 +12,20 @@ import datetime as dt
 import math
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from foot import __version__
+from foot.analysis.engine import Engine, EngineConfig
+from foot.analysis.request import DEFAULT_TIMEZONE, resolve_timezone
+from foot.analysis.rubrics import RUBRICS
+from foot.collect import (
+    Cache,
+    FootballDataProvider,
+    ManualProvider,
+    OpenFootballProvider,
+    Provider,
+    Registry,
+)
 from foot.data.csv_source import load_matches
 from foot.data.synthetic import LeagueTruth, synthetic_league, synthetic_odds
 from foot.domain import Fixture, MatchLog
@@ -31,10 +43,15 @@ from foot.league.table import LeagueTable
 from foot.market.devig import DevigMethod, fair_probabilities, shin_insider_fraction
 from foot.market.kelly import kelly_portfolio
 from foot.market.odds import MatchOdds
+from foot.markets.portfolio import build_ticket, plan_stakes
 from foot.models.dixon_coles import DixonColesModel
 from foot.models.poisson import PoissonModel
 from foot.ratings.elo import EloRatingSystem
+from foot.report.card import render_card, render_rubric_grid
+from foot.report.table import render_summary
+from foot.report.web import serve
 from foot.simulation.season import SeasonSimulator
+from foot.validation.chrono import validate
 
 __all__ = ["main"]
 
@@ -389,6 +406,141 @@ def command_demo(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Parcours principal (français)
+# --------------------------------------------------------------------------- #
+
+
+def _build_registry(args: argparse.Namespace) -> Registry:
+    """Assemble the providers, with a dated cache unless disabled."""
+    cache = None if getattr(args, "no_cache", False) else Cache(
+        args.cache, ttl_seconds=args.cache_ttl
+    )
+    providers: list[Provider] = [
+        OpenFootballProvider(cache),
+        FootballDataProvider(cache),
+    ]
+    results_csv = getattr(args, "resultats_csv", None)
+    odds_csv = getattr(args, "cotes_csv", None)
+    if results_csv or odds_csv:
+        providers.append(
+            ManualProvider(results_csv=results_csv, odds_csv=odds_csv, label="import manuel")
+        )
+    return Registry(providers)
+
+
+def _read_matches(args: argparse.Namespace) -> str:
+    """Read the requested fixtures from --fichier, positional text, or stdin."""
+    if getattr(args, "fichier", None):
+        return Path(args.fichier).read_text(encoding="utf-8")
+    if getattr(args, "rencontres", None):
+        return "\n".join(args.rencontres)
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    raise ValueError(
+        "aucune rencontre fournie : utilisez --fichier, passez-les en arguments, "
+        "ou envoyez-les sur l'entrée standard"
+    )
+
+
+def command_analyser(args: argparse.Namespace) -> int:
+    """The main journey: matches in, one decision per match out."""
+    text = _read_matches(args)
+    zone = resolve_timezone(args.fuseau)
+    as_of = (
+        dt.datetime.fromisoformat(args.date).replace(tzinfo=zone)
+        if args.date
+        else dt.datetime.now(zone)
+    )
+    registry = _build_registry(args)
+    engine = Engine(
+        registry,
+        config=EngineConfig(
+            half_life_days=args.demi_vie, timezone=args.fuseau, seasons=tuple(args.saisons)
+        ),
+    )
+    run = engine.run(
+        text, as_of=as_of, timezone=args.fuseau,
+        bookmaker=args.bookmaker, quoted_at=as_of,
+    )
+
+    print(_heading("ANALYSE"))
+    print(render_summary(run))
+    for analysis in run.analyses:
+        print()
+        print(render_card(analysis, detailed=not args.court))
+        if args.rubriques:
+            print()
+            print(render_rubric_grid(analysis))
+
+    decisions = [
+        (f"{a.resolved.fixture.home} – {a.resolved.fixture.away}", a.decision)
+        for a in run.analyses
+        if a.decision is not None and a.resolved.fixture is not None
+    ]
+    if args.budget:
+        print()
+        print(_heading("MISES"))
+        print(plan_stakes(decisions, budget=args.budget, kelly_fraction=args.kelly).render())
+    if args.combine:
+        print()
+        print(_heading("COMBINÉ"))
+        print(build_ticket(decisions, max_legs=args.combine).render())
+    print()
+    print(_heading("FOURNISSEURS"))
+    print(run.registry_report.render())
+    return 0
+
+
+def command_fournisseurs(args: argparse.Namespace) -> int:
+    """Probe every provider and report what is actually reachable."""
+    print(_heading("FOURNISSEURS — état mesuré, non déclaré"))
+    print(_build_registry(args).probe().render())
+    return 0
+
+
+def command_rubriques(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Print the investigation grid and what each rubric needs."""
+    print(_heading("GRILLE DES 22 RUBRIQUES"))
+    print(
+        "Reconstruction fidèle à partir du cahier des charges de l'opérateur.\n"
+        "Le document canonique n'ayant pas été fourni, la grille est une donnée :\n"
+        "remplacez-la via foot.analysis.rubrics.load_rubrics(chemin.json).\n"
+    )
+    for rubric in RUBRICS:
+        needs = ", ".join(sorted(c.value for c in rubric.requires)) or "aucune source externe"
+        print(f"R{rubric.number:02d} · {rubric.title}")
+        print(f"      phase : {rubric.phase.value} · requiert : {needs}")
+        if rubric.detail:
+            print(f"      {rubric.detail}")
+    return 0
+
+
+def command_valider(args: argparse.Namespace) -> int:
+    """Chronological validation on real data."""
+    provider = OpenFootballProvider(Cache(args.cache, ttl_seconds=args.cache_ttl))
+    history, evidence = provider.history(args.competition, list(args.saisons))
+    if not history:
+        raise ValueError(f"aucun historique récupéré pour {args.competition}")
+    print(_heading(f"VALIDATION CHRONOLOGIQUE — {args.competition}"))
+    for item in evidence:
+        print(f"  {item.render()}")
+    print()
+    report = validate(
+        history, competition=args.competition, folds=args.plis,
+        min_train=args.min_entrainement,
+    )
+    print(report.render())
+    return 0
+
+
+def command_web(args: argparse.Namespace) -> int:
+    """Serve the French interface."""
+    engine = Engine(_build_registry(args), config=EngineConfig(timezone=args.fuseau))
+    serve(engine, host=args.hote, port=args.port)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # Argument parsing
 # --------------------------------------------------------------------------- #
 
@@ -451,6 +603,66 @@ def build_parser() -> argparse.ArgumentParser:
     devig = subparsers.add_parser("devig", help="strip the margin from 1X2 odds")
     devig.add_argument("odds", type=float, nargs=3, metavar=("HOME", "DRAW", "AWAY"))
     devig.set_defaults(handler=command_devig)
+
+    # ---- parcours principal, en français ----
+    def _data_options(sub: argparse.ArgumentParser) -> None:
+        group = sub.add_argument_group("données")
+        group.add_argument("--cache", default=".foot-cache", help="répertoire de cache daté")
+        group.add_argument("--cache-ttl", type=float, default=6 * 3600,
+                           help="durée de validité du cache, en secondes")
+        group.add_argument("--no-cache", action="store_true", help="ignorer le cache")
+        group.add_argument("--saisons", nargs="+",
+                           default=["2024-25", "2025-26", "2026-27"],
+                           help="saisons chargées pour l'historique")
+        group.add_argument("--resultats-csv", help="import manuel de résultats (CSV)")
+        group.add_argument("--cotes-csv", help="import manuel de cotes (CSV)")
+
+    analyser = subparsers.add_parser(
+        "analyser", help="analyser une ou plusieurs rencontres (parcours principal)"
+    )
+    analyser.add_argument("rencontres", nargs="*", help="une rencontre par argument")
+    analyser.add_argument("--fichier", help="fichier texte, une rencontre par ligne")
+    analyser.add_argument("--date", help="instant d'analyse (as_of), format ISO")
+    analyser.add_argument("--fuseau", default=DEFAULT_TIMEZONE, help="fuseau horaire")
+    analyser.add_argument("--bookmaker", help="nom du bookmaker pour les cotes fournies")
+    analyser.add_argument("--demi-vie", type=float, default=240.0,
+                          help="demi-vie de pondération, en jours")
+    analyser.add_argument("--budget", type=float,
+                          help="budget de mise ; sans budget, aucune mise n'est chiffrée")
+    analyser.add_argument("--kelly", type=float, default=0.25, help="fraction de Kelly")
+    analyser.add_argument("--combine", type=int, metavar="N",
+                          help="proposer un combiné d'au plus N sélections")
+    analyser.add_argument("--rubriques", action="store_true",
+                          help="afficher la grille des 22 rubriques par rencontre")
+    analyser.add_argument("--court", action="store_true", help="fiches abrégées")
+    _data_options(analyser)
+    analyser.set_defaults(handler=command_analyser)
+
+    fournisseurs = subparsers.add_parser(
+        "fournisseurs", help="sonder les fournisseurs et afficher leur couverture réelle"
+    )
+    _data_options(fournisseurs)
+    fournisseurs.set_defaults(handler=command_fournisseurs)
+
+    rubriques = subparsers.add_parser("rubriques", help="afficher la grille des 22 rubriques")
+    rubriques.set_defaults(handler=command_rubriques)
+
+    valider = subparsers.add_parser(
+        "valider", help="validation chronologique sur données réelles"
+    )
+    valider.add_argument("--competition", default="en.1", help="clé de compétition")
+    valider.add_argument("--plis", type=int, default=4, help="nombre de plis")
+    valider.add_argument("--min-entrainement", type=int, default=300,
+                         help="taille minimale de la fenêtre d'entraînement")
+    _data_options(valider)
+    valider.set_defaults(handler=command_valider)
+
+    web = subparsers.add_parser("web", help="lancer l'interface web en français")
+    web.add_argument("--hote", default="127.0.0.1")
+    web.add_argument("--port", type=int, default=8000)
+    web.add_argument("--fuseau", default=DEFAULT_TIMEZONE)
+    _data_options(web)
+    web.set_defaults(handler=command_web)
 
     kelly = subparsers.add_parser("kelly", help="optimal simultaneous stake sizing")
     kelly.add_argument("--probabilities", type=float, nargs="+", required=True)
