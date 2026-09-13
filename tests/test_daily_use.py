@@ -19,8 +19,15 @@ réponses fixes, comme le ferait une réponse enregistrée.
 from __future__ import annotations
 
 import datetime as dt
+import os
+import socketserver
 import tempfile
-from collections.abc import Sequence
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -31,10 +38,12 @@ from foot.analysis.journey import run_journey
 from foot.analysis.ledgerbook import Forecast, ForecastBook, record_run
 from foot.analysis.watch import WatchPlan, due_soon, watch_until_kickoff
 from foot.collect.base import Capability, LineupSource
+from foot.collect.footballdata_org import CREDENTIAL
 from foot.collect.registry import Registry
 from foot.collect.supplements import LineupRow, SupplementSet
 from foot.domain import Fixture
 from foot.provenance import Confidence, Evidence, Source, utcnow
+from foot.report.web import make_handler, render_form
 
 PARIS = ZoneInfo("Europe/Paris")
 KICKOFF = dt.datetime(2026, 9, 14, 20, 45, tzinfo=PARIS)
@@ -402,3 +411,126 @@ def test_a_corrupt_journal_line_does_not_crash_the_measurement() -> None:
     assert Forecast.from_json(line).probabilities == (0.4, 0.3, 0.3)
     truncated = line.replace('"probabilities": [0.4, 0.3, 0.3]', '"probabilities": [0.4]')
     assert Forecast.from_json(truncated).probabilities == (0.4, 0.0, 0.0)
+
+
+# --------------------------------------------------------------------------- #
+# 4. L'écran du téléphone : accès privé, sauvegarde, clés côté serveur
+# --------------------------------------------------------------------------- #
+
+
+def _open(url: str, *, data: bytes | None = None, cookie: str = "") -> tuple[int, str, str]:
+    """One request against a live local server — status, body, Set-Cookie."""
+    request = urllib.request.Request(url, data=data)
+    if cookie:
+        request.add_header("Cookie", cookie)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return (
+                response.status,
+                response.read().decode("utf-8"),
+                response.headers.get("Set-Cookie", "") or "",
+            )
+    except urllib.error.HTTPError as error:
+        return (error.code, error.read().decode("utf-8"), "")
+
+
+@contextmanager
+def _running(**kwargs: object) -> Iterator[str]:
+    """Serve the interface on a free local port for the duration of a test."""
+    class Server(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    handler = make_handler(_engine(), **kwargs)  # type: ignore[arg-type]
+    with Server(("127.0.0.1", 0), handler) as httpd:
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{httpd.server_address[1]}"
+        finally:
+            httpd.shutdown()
+            thread.join(timeout=5)
+
+
+def test_the_first_screen_is_matches_date_bookmaker_and_one_button() -> None:
+    """Le téléphone doit montrer l'essentiel, pas le formulaire entier."""
+    page = render_form()
+    order = [
+        page.index('id="matchs"'),
+        page.index('id="date"'),
+        page.index('id="book"'),
+        page.index('<button type="submit">'),
+    ]
+    assert order == sorted(order), "l'ordre de l'écran suit le geste de l'opérateur"
+    assert page.count('<button type="submit">') == 1
+    assert page.index('<button type="submit">') < page.index('id="budget"'), (
+        "budget, combiné et contexte sont repliés sous le bouton"
+    )
+
+
+def test_without_a_token_the_interface_stays_open() -> None:
+    with _running() as base:
+        status, body, _cookie = _open(base + "/")
+        assert status == 200
+        assert "Rencontres à analyser" in body
+
+
+def test_a_private_interface_refuses_a_request_without_the_token() -> None:
+    with _running(token="jeton-de-test") as base:
+        status, body, _ = _open(base + "/")
+        assert status == 403
+        assert "Accès privé" in body
+
+        status, _body, _ = _open(base + "/?jeton=mauvais")
+        assert status == 403
+
+
+def test_the_token_travels_once_in_the_address_then_in_a_cookie() -> None:
+    with _running(token="jeton-de-test") as base:
+        status, body, cookie = _open(base + "/?jeton=jeton-de-test")
+        assert status == 200
+        assert "Rencontres à analyser" in body
+        assert "foot_acces=jeton-de-test" in cookie
+        assert "HttpOnly" in cookie and "SameSite=Strict" in cookie
+        assert "jeton-de-test" not in body, "le jeton n'est jamais rendu dans la page"
+
+        status, _body, _ = _open(base + "/", cookie="foot_acces=jeton-de-test")
+        assert status == 200
+
+
+def test_an_analysis_served_to_the_phone_is_kept_on_the_server() -> None:
+    """Le téléphone ne conserve rien : la sauvegarde est côté serveur."""
+    with tempfile.TemporaryDirectory() as folder:
+        book = ForecastBook(Path(folder) / "journal.jsonl")
+        with _running(book=book) as base:
+            form = urllib.parse.urlencode(
+                {
+                    "matchs": _LINE,
+                    "date": "2026-09-13T12:00",
+                    "tz": "Europe/Paris",
+                    "book": "",
+                    "budget": "",
+                    "combine": "non",
+                }
+            ).encode()
+            status, body, _ = _open(base + "/", data=form)
+        assert status == 200
+        assert "prévision(s) conservée(s) côté serveur" in body
+        assert len(book) == 1
+
+
+def test_no_api_key_can_reach_a_rendered_page() -> None:
+    """Les clés vivent dans l'environnement du serveur, jamais dans le HTML."""
+    secret = "clé-secrète-de-test-0123456789"
+    previous = os.environ.get(CREDENTIAL)
+    os.environ[CREDENTIAL] = secret
+    try:
+        with _running() as base:
+            _status, body, _ = _open(base + "/")
+        assert secret not in body
+        assert CREDENTIAL not in body
+    finally:
+        if previous is None:
+            os.environ.pop(CREDENTIAL, None)
+        else:
+            os.environ[CREDENTIAL] = previous

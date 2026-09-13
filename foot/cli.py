@@ -67,7 +67,7 @@ from foot.provenance import utcnow
 from foot.ratings.elo import EloRatingSystem
 from foot.report.card import render_card, render_rubric_grid
 from foot.report.table import render_summary
-from foot.report.web import serve
+from foot.report.web import access_token, serve
 from foot.simulation.season import SeasonSimulator
 from foot.validation.chrono import validate
 
@@ -722,7 +722,8 @@ def command_valider(args: argparse.Namespace) -> int:
 
 
 def command_web(args: argparse.Namespace) -> int:
-    """Serve the French interface."""
+    """Serve the French interface — privately, when asked to."""
+    load_credentials()
     engine = Engine(
         _build_registry(args),
         config=EngineConfig(
@@ -730,7 +731,18 @@ def command_web(args: argparse.Namespace) -> int:
             rubrics_path=Path(args.protocole) if args.protocole else None,
         ),
     )
-    serve(engine, host=args.hote, port=args.port)
+    token = args.jeton
+    if token == "auto":
+        token = access_token()
+    serve(
+        engine,
+        host=args.hote,
+        port=args.port,
+        token=token or "",
+        certfile=args.certificat or "",
+        keyfile=args.cle or "",
+        book=ForecastBook(args.journal) if args.journal else None,
+    )
     return 0
 
 
@@ -994,6 +1006,20 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--hote", default="127.0.0.1")
     web.add_argument("--port", type=int, default=8000)
     web.add_argument("--fuseau", default=DEFAULT_TIMEZONE)
+    web.add_argument(
+        "--jeton",
+        nargs="?",
+        const="auto",
+        help="exiger un jeton d'accès ; « --jeton » seul en tire un au hasard",
+    )
+    web.add_argument("--certificat", help="certificat TLS (active HTTPS)")
+    web.add_argument("--cle", help="clé privée TLS correspondante")
+    web.add_argument(
+        "--journal",
+        nargs="?",
+        const=str(DEFAULT_BOOK),
+        help="conserver chaque analyse servie, côté serveur",
+    )
     _data_options(web)
     web.set_defaults(handler=command_web)
 

@@ -67,6 +67,10 @@ def render_card(analysis: MatchAnalysis, *, detailed: bool = True) -> str:
         lines.append(f"  {reason}")
         if resolved.candidates:
             lines.append(f"  candidats possibles : {', '.join(resolved.candidates)}")
+            lines.append(
+                "  pour trancher : reprenez le nom complet d'un candidat, ou "
+                "retirez la date pour laisser le calendrier la fixer."
+            )
         lines.append("")
         lines.append("  Cette rencontre reste au récapitulatif : rien n'est abandonné.")
         return "\n".join(lines)

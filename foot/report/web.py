@@ -19,14 +19,19 @@ to be admired.
 from __future__ import annotations
 
 import datetime as dt
+import hmac
 import html
 import http.server
+import secrets
 import socketserver
+import ssl
 import urllib.parse
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
 from foot.analysis.engine import AnalysisRun, Engine
 from foot.analysis.journey import JourneyResult, run_journey
+from foot.analysis.ledgerbook import ForecastBook, record_run
 from foot.analysis.request import DEFAULT_TIMEZONE, resolve_timezone
 from foot.collect.supplements import SupplementSet
 from foot.markets.portfolio import build_ticket, plan_stakes
@@ -34,6 +39,7 @@ from foot.report.card import render_card, render_rubric_grid
 from foot.report.table import render_summary
 
 __all__ = [
+    "access_token",
     "analyse_form",
     "build_page",
     "render_form",
@@ -65,8 +71,9 @@ textarea { min-height:130px; font-family:ui-monospace,SFMono-Regular,Menlo,monos
 .row { display:flex; gap:14px; flex-wrap:wrap; }
 .row > div { flex:1 1 200px; min-width:0; }
 textarea.small { min-height:88px; }
-details.ctx { margin-top:18px; border:1px solid var(--line); border-radius:8px;
+details.ctx { margin-top:14px; border:1px solid var(--line); border-radius:8px;
               padding:10px 14px; }
+details.ctx button { margin-top:12px; }
 ul.rejets { margin:8px 0 0; padding-left:20px; font-size:0.86rem; }
 @media (max-width:560px) {
   .row { gap:0; }
@@ -114,29 +121,34 @@ _FORM = """
       <input type="text" id="book" name="book" value="{book}" placeholder="ex. Pinnacle">
     </div>
   </div>
-  <div class="row">
-    <div>
-      <label for="budget">Budget pour les mises (facultatif)</label>
-      <input type="number" step="any" min="0" id="budget" name="budget" value="{budget}"
-             placeholder="laisser vide : aucune mise proposée">
-      <p class="hint">Aucun capital n'est supposé&nbsp;:
-        sans budget, aucune mise n'est chiffrée.</p>
+  <button type="submit">Analyser</button>
+  <details class="ctx">
+    <summary>Mises et combiné (facultatif)</summary>
+    <div class="row">
+      <div>
+        <label for="budget">Budget pour les mises</label>
+        <input type="number" step="any" min="0" id="budget" name="budget" value="{budget}"
+               placeholder="laisser vide : aucune mise proposée">
+        <p class="hint">Aucun capital n'est supposé&nbsp;:
+          sans budget, aucune mise n'est chiffrée.</p>
+      </div>
+      <div>
+        <label for="combine">Combiné</label>
+        <select id="combine" name="combine">
+          <option value="non"{c_non}>Non — paris simples uniquement</option>
+          <option value="oui"{c_oui}>Oui — le plus court qui reste pertinent</option>
+        </select>
+      </div>
     </div>
-    <div>
-      <label for="combine">Combiné</label>
-      <select id="combine" name="combine">
-        <option value="non"{c_non}>Non — paris simples uniquement</option>
-        <option value="oui"{c_oui}>Oui — le plus court qui reste pertinent</option>
-      </select>
-    </div>
-  </div>
+  </details>
   <details class="ctx"{ctx_open}>
-    <summary>Contexte à fournir — xG, absences, compositions (facultatif)</summary>
-    <p class="hint">Aucune source accessible ne publie ces données ici. Collez-les
-      et les rubriques correspondantes passent de « non renseignée » à
-      « traitée ». Une ligne illisible est affichée pour correction, jamais
-      devinée. Sans heure de publication, une ligne du jour n'est réputée
-      connue que le lendemain.</p>
+    <summary>Contexte à coller — xG, absences, compositions (facultatif)</summary>
+    <p class="hint">À n'utiliser que pour ce qu'aucune source active ne sert&nbsp;:
+      la liste des fournisseurs, en bas de chaque analyse, dit lesquels le sont.
+      Une ligne collée ici est marquée « fournie par l'opérateur » de bout en
+      bout. Une ligne illisible est affichée pour correction, jamais devinée.
+      Sans heure de publication, une ligne du jour n'est réputée connue que le
+      lendemain.</p>
     <label for="xg">xG — <code>date,home,away,home_xg,away_xg</code>
       puis au choix <code>source,statut,publication</code></label>
     <textarea id="xg" name="xg" class="small"
@@ -150,7 +162,6 @@ _FORM = """
     <textarea id="compositions" name="compositions" class="small"
       placeholder="{compo_ph}">{compositions}</textarea>
   </details>
-  <button type="submit">Analyser</button>
 </form>
 """
 
@@ -349,8 +360,33 @@ def render_result(result: JourneyResult, *, budget: float | None, combine: bool)
     return "\n".join(parts)
 
 
-def make_handler(engine: Engine) -> type[http.server.BaseHTTPRequestHandler]:
-    """Build a request handler bound to one engine instance."""
+_COOKIE = "foot_acces"
+
+
+def access_token(length: int = 24) -> str:
+    """A fresh access token, drawn from the system's own randomness.
+
+    Private access means *this* phone, not the whole network segment. The token
+    lives in the URL once, then in a cookie; it never travels in a page, never
+    reaches a log, and is worthless without the address it opens.
+    """
+    return secrets.token_urlsafe(length)
+
+
+def make_handler(
+    engine: Engine,
+    *,
+    token: str = "",
+    book: ForecastBook | None = None,
+) -> type[http.server.BaseHTTPRequestHandler]:
+    """Build a request handler bound to one engine instance.
+
+    Args:
+        token: when set, every request must carry it — once in the address
+            (``?jeton=…``), then in a cookie. Without it the page is refused.
+        book: when set, every analysis served is journalled **server-side**, so
+            a phone that loses its browser tab loses nothing.
+    """
 
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "foot/2.0"
@@ -360,19 +396,61 @@ def make_handler(engine: Engine) -> type[http.server.BaseHTTPRequestHandler]:
             # console stays readable.  Real failures still raise and surface.
             _ = (format, args)
 
-        def _send(self, page: str, status: int = 200) -> None:
+        def _send(self, page: str, status: int = 200, *, cookie: str = "") -> None:
             payload = page.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
+            if cookie:
+                self.send_header(
+                    "Set-Cookie",
+                    f"{_COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict",
+                )
             self.end_headers()
             self.wfile.write(payload)
 
+        def _supplied_token(self) -> str:
+            """Read the token from the address, then from the cookie."""
+            query = urllib.parse.urlparse(self.path).query
+            from_url = urllib.parse.parse_qs(query).get("jeton", [""])[0]
+            if from_url:
+                return from_url
+            raw = self.headers.get("Cookie", "")
+            for part in raw.split(";"):
+                name, _, value = part.strip().partition("=")
+                if name == _COOKIE:
+                    return value
+            return ""
+
+        def _authorised(self) -> bool:
+            """Compare in constant time, so a wrong token leaks no timing."""
+            if not token:
+                return True
+            return hmac.compare_digest(self._supplied_token(), token)
+
+        def _refuse(self) -> None:
+            self._send(
+                build_page(
+                    body='<div class="note">Accès privé. Ouvrez l\'adresse '
+                    "complète fournie au démarrage, jeton compris.</div>"
+                ),
+                status=403,
+            )
+
         def do_GET(self) -> None:
+            if not self._authorised():
+                self._refuse()
+                return
             now = dt.datetime.now(resolve_timezone(DEFAULT_TIMEZONE))
-            self._send(build_page(date=now.strftime("%Y-%m-%dT%H:%M")))
+            self._send(
+                build_page(date=now.strftime("%Y-%m-%dT%H:%M")),
+                cookie=self._supplied_token() if token else "",
+            )
 
         def do_POST(self) -> None:
+            if not self._authorised():
+                self._refuse()
+                return
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8")
             form = urllib.parse.parse_qs(raw, keep_blank_values=True)
@@ -408,6 +486,18 @@ def make_handler(engine: Engine) -> type[http.server.BaseHTTPRequestHandler]:
                         pasted=context,
                     )
                     body = render_result(result, budget=budget, combine=combine)
+                    if book is not None:
+                        kept = record_run(
+                            result.run.analyses,
+                            book=book,
+                            as_of=as_of,
+                            reason="formulaire",
+                        )
+                        body += (
+                            f'<div class="note">Sauvegarde&nbsp;: {len(kept)} '
+                            f"prévision(s) conservée(s) côté serveur. "
+                            f"Rien n'y est réécrit après coup.</div>"
+                        )
                 else:
                     body = '<div class="note">Saisissez au moins une rencontre.</div>'
             except (ValueError, KeyError) as error:
@@ -430,15 +520,52 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8000,
     announce: Callable[[str], None] = print,
+    token: str = "",
+    certfile: str | Path = "",
+    keyfile: str | Path = "",
+    book: ForecastBook | None = None,
 ) -> None:
-    """Run the interface until interrupted."""
+    """Run the interface until interrupted.
+
+    Three things make this safe to expose beyond ``localhost``, and the caller
+    must ask for all three — none is switched on silently:
+
+    ``token``
+        a private address. Without it anyone reaching the port gets the form.
+    ``certfile``/``keyfile``
+        HTTPS. A token sent over plain HTTP is a token given away, so the
+        announcement says so plainly when TLS is off and the host is not local.
+    ``book``
+        server-side storage of every analysis served, so the phone holds none
+        of the state.
+
+    API keys never reach the browser in any configuration: the engine reads
+    them from the server's own environment, and no page template renders them.
+    """
 
     class Server(socketserver.ThreadingTCPServer):
         allow_reuse_address = True
         daemon_threads = True
 
-    with Server((host, port), make_handler(engine)) as httpd:
-        announce(f"Interface disponible sur http://{host}:{port}  (Ctrl+C pour arrêter)")
+    scheme = "https" if certfile and keyfile else "http"
+    with Server((host, port), make_handler(engine, token=token, book=book)) as httpd:
+        if scheme == "https":
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=str(certfile), keyfile=str(keyfile))
+            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+        suffix = f"/?jeton={token}" if token else "/"
+        announce(
+            f"Interface disponible sur {scheme}://{host}:{port}{suffix}"
+            f"  (Ctrl+C pour arrêter)"
+        )
+        if token and scheme == "http" and host not in {"127.0.0.1", "localhost"}:
+            announce(
+                "ATTENTION : jeton transmis en clair. Sur un réseau non local, "
+                "fournissez un certificat (--certificat/--cle) ou placez le "
+                "service derrière un reverse proxy HTTPS."
+            )
+        if book is not None:
+            announce(f"Analyses conservées dans {book.path} (ajout seul).")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
