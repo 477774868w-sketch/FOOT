@@ -18,6 +18,7 @@ from foot import __version__
 from foot.analysis.engine import Engine, EngineConfig
 from foot.analysis.journey import JourneyResult, run_journey
 from foot.analysis.ledgerbook import DEFAULT_BOOK, ForecastBook, record_run
+from foot.analysis.measure import measure
 from foot.analysis.request import DEFAULT_TIMEZONE, resolve_timezone
 from foot.analysis.rubrics import RUBRICS
 from foot.analysis.watch import WatchPlan, watch_until_kickoff
@@ -29,7 +30,12 @@ from foot.collect import (
     Provider,
     Registry,
 )
-from foot.collect.base import CollectionError, ProviderStatus, Reachability
+from foot.collect.base import (
+    CollectionError,
+    ProviderStatus,
+    Reachability,
+    SeasonData,
+)
 from foot.collect.catalogue import (
     PROVIDER_CATALOGUE,
     CatalogueEntry,
@@ -45,7 +51,7 @@ from foot.collect.footballdata_org import FootballDataOrgProvider
 from foot.collect.oddsapi import OddsApiProvider
 from foot.data.csv_source import load_matches
 from foot.data.synthetic import LeagueTruth, synthetic_league, synthetic_odds
-from foot.domain import Fixture, MatchLog
+from foot.domain import Fixture, Match, MatchLog
 from foot.evaluation.backtest import (
     BaseRateForecaster,
     BlendForecaster,
@@ -458,6 +464,7 @@ def _build_registry(args: argparse.Namespace) -> Registry:
                 fixtures_csv=fixtures_csv,
                 odds_quoted_at=_moment(quoted, args),
                 label="import manuel",
+                competition_key=getattr(args, "import_competition", None) or "manuel",
             )
         )
     return Registry(providers)
@@ -796,6 +803,55 @@ def command_suivre(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_mesurer(args: argparse.Namespace) -> int:
+    """Join the journal to the results, and score what was forecast.
+
+    Reads the journal; never writes to it. The results come from the same
+    providers the analysis uses, so a match the sources cannot confirm stays
+    pending rather than being scored on a guess.
+    """
+    book = ForecastBook(args.fichier)
+    forecasts = list(book)
+    if not forecasts:
+        print(_heading("MESURE"))
+        print(f"Journal vide ({book.path}) : rien à mesurer.")
+        return 0
+    competitions = sorted({f.competition for f in forecasts if f.competition})
+    registry = _build_registry(args)
+    engine = Engine(
+        registry, config=EngineConfig(seasons=tuple(args.saisons))
+    )
+    played: list[Match] = []
+    closing: dict[str, float] = {}
+    for competition in competitions:
+        for season in args.saisons:
+            try:
+                data = _season_for(engine, competition, season)
+            except (CollectionError, ValueError, KeyError) as error:
+                print(f"  {competition} {season} : {error}", file=sys.stderr)
+                continue
+            played.extend(data.played)
+    print(_heading("MESURE DES PRÉVISIONS ENREGISTRÉES"))
+    print(f"  journal    : {book.path} ({len(forecasts)} ligne(s))")
+    print(f"  résultats  : {len(played)} match(s) joués, {', '.join(competitions)}")
+    if not closing:
+        print(
+            "  clôture    : aucune source de cotes de clôture joignable "
+            "— l'écart au prix de clôture ne sera pas mesuré"
+        )
+    print()
+    print(measure(book, results=played, closing=closing).render())
+    return 0
+
+
+def _season_for(engine: Engine, competition: str, season: str) -> SeasonData:
+    """One competition-season from the first provider that can serve it."""
+    for provider in engine.providers:
+        if competition in provider.competitions():
+            return provider.season(competition, season)
+    raise CollectionError(f"aucun fournisseur ne sert {competition}")
+
+
 def command_journal(args: argparse.Namespace) -> int:
     """Read back the forecast journal — the only honest basis for measurement."""
     book = ForecastBook(args.fichier)
@@ -888,6 +944,13 @@ def build_parser() -> argparse.ArgumentParser:
             "--calendrier-csv",
             help="calendrier manuel des rencontres à venir : date,home,away[,neutre]",
         )
+        group.add_argument(
+            "--import-competition",
+            metavar="CLÉ",
+            help="compétition à laquelle rattacher l'import manuel (ex. it.1) ; "
+            "sans elle, l'import vit sous la clé « manuel » et ne partage aucun "
+            "historique avec une compétition réelle",
+        )
         group.add_argument("--cotes-csv", help="import manuel de cotes (CSV)")
         group.add_argument(
             "--cotes-relevees",
@@ -967,6 +1030,14 @@ def build_parser() -> argparse.ArgumentParser:
     journal.add_argument("--fichier", default=str(DEFAULT_BOOK))
     journal.add_argument("--limite", type=int, default=20)
     journal.set_defaults(handler=command_journal)
+
+    mesurer = subparsers.add_parser(
+        "mesurer",
+        help="apparier le journal aux résultats et mesurer, sans rien y réécrire",
+    )
+    mesurer.add_argument("--fichier", default=str(DEFAULT_BOOK))
+    _data_options(mesurer)
+    mesurer.set_defaults(handler=command_mesurer)
 
     fournisseurs = subparsers.add_parser(
         "fournisseurs", help="sonder les fournisseurs et afficher leur couverture réelle"

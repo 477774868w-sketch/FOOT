@@ -604,6 +604,7 @@ parcours normal.
 | Décision, confiance, risque principal, condition d'annulation | `R22` ✓ |
 | **Contrôle T−75/T−60 exécuté**, avec nouvelles tentatives jusqu'au coup d'envoi | `foot suivre` ; `tests/test_daily_use.py` (6 tests) |
 | **Journal des prévisions** en ajout seul, révision distinguée d'une reconduction | `foot journal` ; `tests/test_daily_use.py` (6 tests) |
+| **Mesure du journal** : RPS, calibration, skill, rendement réglé au catalogue | `foot mesurer` ; §12, mesuré sur 110 rencontres réelles |
 | **Accès privé + HTTPS + sauvegarde côté serveur** | `foot web --jeton --certificat --cle --journal` ; 5 tests sur serveur réel |
 | Restitution de **chaque ligne saisie**, ambiguïtés nommées avec la façon de trancher | « Contrôle : chaque ligne saisie apparaît bien ci-dessus. » |
 
@@ -626,7 +627,7 @@ engagement ; le logiciel ne souscrit à rien.
 | xG, npxG, tirs (`R07`, `R08`, `R09`, `R14`) | 4 rubriques bloquées | même adaptateur, ou une source xG dédiée |
 | Entraîneur et styles (`R12`) | rubrique bloquée | aucune source cataloguée |
 | Météo, pelouse, arbitre (`R15`) | rubrique bloquée | football-data.co.uk sert l'arbitre mais est **injoignable depuis cet environnement** (403 du proxy) |
-| **L'évaluation** du journal : calibration, erreurs, cotes de clôture, résultats | le journal **conserve** ; il ne **mesure** pas encore | une commande d'appariement journal × résultats × cotes de clôture. La moitié « conserver » de la demande est faite, la moitié « évaluer » ne l'est pas, et il serait malhonnête de la présenter autrement : sans plusieurs semaines de prévisions écrites avant match, il n'y aurait de toute façon rien à calibrer |
+| Cotes de **clôture** pour l'écart de timing | l'écart au prix de clôture reste non mesuré | football-data.co.uk les sert et l'adaptateur existe, mais il est **injoignable ici** ; `foot mesurer` dit alors « non mesuré » plutôt que de se taire |
 
 Aucune de ces rubriques ne produit d'affirmation : le rapport les marque
 indisponibles et nomme, pour chacune, l'action exacte qui la lèverait —
@@ -736,3 +737,100 @@ protocole synchronisé        protocole/protocole-22-rubriques.json == dump_rubr
 
 54 tests ajoutés (`tests/test_live_integrations.py`, `tests/test_daily_use.py`),
 tous hors réseau et sans clé.
+
+
+---
+
+## 12. Mesurer ce qui a été prévu — `foot mesurer`
+
+La §6 demandait deux choses : **conserver** les prévisions, puis les **évaluer**.
+La première était livrée au §11 ; la seconde l'est ici.
+
+### 12.1 La règle qui gouverne le module
+
+Le journal écrit **avant** le match ; la mesure lit **après**, et **n'écrit
+rien**. Un test vérifie littéralement que le fichier est identique octet pour
+octet après un rapport complet : une mesure qui pourrait corriger la prévision
+qu'elle évalue ne mesurerait rien.
+
+Trois autres refus, chacun testé :
+
+* une rencontre non jouée, ou introuvable dans les résultats chargés, reste **en
+  attente** et n'entre dans aucune moyenne ;
+* seule la **dernière** prévision d'une rencontre est notée. Noter chaque
+  révision compterait une rencontre plusieurs fois et récompenserait celui qui
+  révise le plus souvent ;
+* deux rencontres entre les mêmes équipes sans date enregistrée : **aucune**
+  n'est retenue, parce qu'en choisir une noterait peut-être la mauvaise.
+
+Le règlement d'un pari passe par la **clé de catalogue** enregistrée au journal,
+pas par son libellé : « Victoire extérieur (2) » ne se règle pas, `1X2:A` si.
+Remboursements et quarts de ligne sont donc traités exactement comme l'espérance
+d'avant-match le supposait — un test le vérifie sur quatre règlements distincts
+(gain, perte, remboursement, demi-perte).
+
+### 12.2 Mesure réelle sur 110 rencontres
+
+Rejeu chronologique sur données réelles : historique arrêté au **1er avril
+2026**, prévisions écrites au journal à cette date pour les 110 rencontres
+d'Angleterre, d'Espagne et d'Italie jouées dans les quatre semaines suivantes,
+puis appariement aux résultats réels.
+
+```
+Mesure de 110 rencontre(s) résolue(s), 0 en attente
+  journal          n=110    RPS=0.21032  Brier=0.60458  logloss=1.01249  acc= 57.3%
+  taux de base     n=110    RPS=0.22583  Brier=0.63686  logloss=1.05588  acc= 47.3%
+  skill sur le RPS contre le taux de base de l'échantillon : +6.87%
+
+  calibration over 110 forecast-outcome pairs (ECE = 0.0512, MCE = 0.1736)
+    [0.00, 0.20)  n=39     claimed=0.142  observed=0.205  bias=-0.064
+    [0.20, 0.40)  n=203    claimed=0.284  observed=0.251  bias=+0.033
+    [0.40, 0.60)  n=70     claimed=0.489  observed=0.571  bias=-0.083
+    [0.60, 0.80)  n=17     claimed=0.696  observed=0.588  bias=+0.107
+    [0.80, 1.00)  n=1      claimed=0.826  observed=1.000  bias=-0.174
+
+  Aucun marché réglable n'a été retenu sur ces rencontres : aucun rendement
+  n'est calculé.
+  Cotes de clôture : aucune source n'en a servi pour ces rencontres —
+  l'écart au prix de clôture reste non mesuré.
+```
+
+Ce que ce tableau dit, et ce qu'il ne dit pas :
+
+* **+6,87 % de skill** sur un échantillon **disjoint** de celui du §8.5 (+8,24 %
+  sur la Premier League), ce qui est cohérent sans être une confirmation
+  indépendante : c'est le même modèle sur le même genre de données ;
+* la calibration est **honnête mais imparfaite** : le modèle sous-estime
+  légèrement les favoris à 40-60 % et surestime ceux à 60-80 %. Le dernier
+  intervalle contient **une seule** paire — il ne dit rien, et le rapport
+  l'affiche avec son `n=1` plutôt que de le masquer ;
+* **aucun rendement n'est calculé**, parce qu'aucun prix n'était disponible sur
+  ces rencontres d'archive. C'est le résultat correct : inventer des cotes pour
+  produire un pourcentage aurait été exactement le défaut que tout ce travail
+  cherche à éviter.
+
+### 12.3 Deux corrections rendues nécessaires par la mesure
+
+**Un import manuel ne marquait pas ses résultats.** `ManualProvider` estampillait
+sa clé de compétition sur le calendrier mais pas sur les résultats lus du CSV :
+un fournisseur qui déclare servir `it.1` renvoyait des matchs étiquetés `None`,
+et la mesure ne pouvait apparier aucune prévision à son propre résultat. Corrigé
+au niveau du fournisseur, là où l'incohérence se trouvait.
+
+**Le skill n'était pas calculable sur un échantillon dégénéré.** Si toutes les
+rencontres mesurées finissent de la même façon, le taux de base de l'échantillon
+est parfait par construction, son RPS vaut zéro, et le rapport levait une
+exception au lieu de s'afficher. Il le dit désormais en une ligne. Un rapport qui
+plante sur un petit journal est un rapport qu'on ne lit jamais.
+
+### 12.4 Le plancher de conclusion
+
+En dessous de **30 rencontres résolues**, les chiffres sont affichés — les
+masquer serait une autre forme de malhonnêteté — mais aucune conclusion n'est
+énoncée :
+
+```
+  ÉCHANTILLON INSUFFISANT POUR CONCLURE (3 < 30). Les chiffres sont affichés
+  parce qu'ils existent, pas parce qu'ils démontrent quoi que ce soit — un
+  rendement calculé sur si peu de paris est du bruit.
+```

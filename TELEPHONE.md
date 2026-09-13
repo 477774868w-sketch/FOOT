@@ -102,6 +102,19 @@ $ python3 -m foot journal
 Une ligne par prévision, écrite **avant** le match. Rien n'y est jamais
 réécrit : une décision révisée s'ajoute en citant celle qu'elle remplace.
 
+Quand les matchs ont été joués :
+
+```console
+$ python3 -m foot mesurer
+```
+
+Le journal est apparié aux résultats et noté — RPS, calibration, skill contre le
+taux de base de l'échantillon, rendement observé sur les marchés réellement
+retenus. **Cette commande n'écrit rien dans le journal** : une mesure qui
+pourrait corriger la prévision qu'elle évalue ne mesurerait rien. En dessous de
+30 rencontres résolues, les chiffres s'affichent mais aucune conclusion n'est
+énoncée.
+
 ---
 
 ## Hébergement en ligne — ce qu'il reste à faire

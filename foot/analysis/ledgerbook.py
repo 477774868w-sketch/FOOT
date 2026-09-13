@@ -77,9 +77,25 @@ class Forecast:
     probabilities: tuple[float, float, float]
     expected_goals: tuple[float, float]
     model_version: str
+    match_date: str = ""
+    """ISO date of the fixture — what a later measurement joins on.
+
+    Stored apart from ``kickoff``, which is a localised label meant for a human.
+    Parsing a date back out of « Sun 13/09/2026 20:45 CEST » to decide whether a
+    forecast can be resolved would be a needless failure mode.
+    """
+
     parameters: Mapping[str, object] = field(default_factory=dict)
     decision: str = ""
     market: str = ""
+    market_key: str = ""
+    """Catalogue key of the market backed — ``1X2:A``, ``TOTAL:+2.5``…
+
+    The label is for reading; the key is what lets a later measurement settle
+    the bet **exactly**, refunds and half-lines included, instead of guessing
+    from French prose.
+    """
+
     odds: float | None = None
     bookmaker: str = ""
     quoted_at: str = ""
@@ -130,6 +146,7 @@ class Forecast:
                 "home": self.home,
                 "away": self.away,
                 "kickoff": self.kickoff,
+                "match_date": self.match_date,
                 "fingerprint": self.fingerprint,
                 "probabilities": list(self.probabilities),
                 "expected_goals": list(self.expected_goals),
@@ -137,6 +154,7 @@ class Forecast:
                 "parameters": dict(self.parameters),
                 "decision": self.decision,
                 "market": self.market,
+                "market_key": self.market_key,
                 "odds": self.odds,
                 "bookmaker": self.bookmaker,
                 "quoted_at": self.quoted_at,
@@ -160,6 +178,7 @@ class Forecast:
             home=raw["home"],
             away=raw["away"],
             kickoff=raw.get("kickoff", ""),
+            match_date=raw.get("match_date", ""),
             fingerprint=raw.get("fingerprint", ""),
             probabilities=_triple(raw.get("probabilities")),
             expected_goals=_pair(raw.get("expected_goals")),
@@ -167,6 +186,7 @@ class Forecast:
             parameters=raw.get("parameters", {}),
             decision=raw.get("decision", ""),
             market=raw.get("market", ""),
+            market_key=raw.get("market_key", ""),
             odds=raw.get("odds"),
             bookmaker=raw.get("bookmaker", ""),
             quoted_at=raw.get("quoted_at", ""),
@@ -280,6 +300,7 @@ def record_run(
             home=fixture.home,
             away=fixture.away,
             kickoff=analysis.resolved.kickoff_local(),
+            match_date=fixture.date.isoformat(),
             fingerprint=analysis.sealed.data_fingerprint,
             probabilities=(
                 probabilities.home,
@@ -295,6 +316,7 @@ def record_run(
             },
             decision=decision.status.value if decision else "",
             market=main.offer.label if main else "",
+            market_key=main.offer.key if main else "",
             odds=main.offer.odds if main else None,
             bookmaker=(main.offer.bookmaker or "") if main else "",
             quoted_at=(

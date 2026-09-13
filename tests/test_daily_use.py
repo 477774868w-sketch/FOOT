@@ -36,13 +36,14 @@ from test_acceptance import _COMP, StubProvider, _controlled_history
 from foot.analysis.engine import Engine, EngineConfig
 from foot.analysis.journey import run_journey
 from foot.analysis.ledgerbook import Forecast, ForecastBook, record_run
-from foot.analysis.naming import TeamIndex
+from foot.analysis.measure import measure
+from foot.analysis.naming import TeamIndex, normalise
 from foot.analysis.watch import WatchPlan, due_soon, watch_until_kickoff
 from foot.collect.base import Capability, LineupSource
 from foot.collect.footballdata_org import CREDENTIAL
 from foot.collect.registry import Registry
 from foot.collect.supplements import LineupRow, SupplementSet
-from foot.domain import Fixture
+from foot.domain import Fixture, Match, Score
 from foot.provenance import Confidence, Evidence, Source, utcnow
 from foot.report.card import render_card
 from foot.report.web import make_handler, render_form
@@ -659,3 +660,160 @@ def test_two_sheets_from_two_providers_are_two_confirmations() -> None:
     # name, so this is deliberately *not* a corroboration: same source twice is
     # one source, exactly as two sites republishing one feed would be.
     assert not crossed, "un même fournisseur cité deux fois n'est pas deux sources"
+
+
+# --------------------------------------------------------------------------- #
+# 8. Mesurer, sans jamais retoucher la prévision
+# --------------------------------------------------------------------------- #
+
+
+def _forecast(
+    home: str,
+    away: str,
+    *,
+    probabilities: tuple[float, float, float] = (0.5, 0.25, 0.25),
+    market_key: str = "",
+    odds: float | None = None,
+    date: str = "2026-09-14",
+    supersedes: str = "",
+    fingerprint: str = "a",
+) -> Forecast:
+    return Forecast(
+        recorded_at=utcnow(),
+        as_of=utcnow(),
+        competition=_COMP,
+        home=home,
+        away=away,
+        kickoff="",
+        fingerprint=fingerprint,
+        probabilities=probabilities,
+        expected_goals=(1.5, 1.1),
+        model_version="test",
+        match_date=date,
+        market=market_key,
+        market_key=market_key,
+        odds=odds,
+        decision="recommandé" if market_key else "aucun pari",
+        supersedes=supersedes,
+    )
+
+
+def _played(home: str, away: str, goals: tuple[int, int], day: int = 14) -> Match:
+    return Match(
+        home=home,
+        away=away,
+        date=dt.date(2026, 9, day),
+        score=Score(*goals),
+        competition=_COMP,
+    )
+
+
+def _book_with(*forecasts: Forecast) -> tuple[ForecastBook, Path, str]:
+    folder = tempfile.mkdtemp()
+    book = ForecastBook(Path(folder) / "journal.jsonl")
+    for forecast in forecasts:
+        book.append(forecast)
+    return (book, book.path, book.path.read_text(encoding="utf-8"))
+
+
+def test_a_match_not_yet_played_stays_pending_and_enters_no_average() -> None:
+    book, _path, _ = _book_with(_forecast("Club A", "Club B"))
+    report = measure(book, results=[])
+    assert not report.resolved
+    assert len(report.pending) == 1
+    assert report.scorecard is None
+    assert "Rien n'est mesurable" in report.render()
+
+
+def test_only_the_last_forecast_of_a_match_is_scored() -> None:
+    """Compter chaque révision récompenserait celui qui révise le plus souvent."""
+    book, _path, _ = _book_with(
+        _forecast("Club A", "Club B", probabilities=(0.8, 0.1, 0.1), fingerprint="v1"),
+        _forecast(
+            "Club A", "Club B", probabilities=(0.2, 0.2, 0.6),
+            fingerprint="v2", supersedes="v1",
+        ),
+    )
+    report = measure(book, results=[_played("Club A", "Club B", (0, 2))])
+    assert len(report.resolved) == 1
+    assert report.resolved[0].forecast.fingerprint == "v2"
+    assert report.revised == 1
+
+
+def test_a_bet_is_settled_through_the_catalogue_not_by_guesswork() -> None:
+    """Gain, perte, remboursement et demi-ligne, chacun à son résultat exact."""
+    cases = (
+        ("1X2:H", 2.50, (2, 0), 1.50),   # gagné : cote − 1
+        ("1X2:H", 2.50, (0, 1), -1.00),  # perdu
+        ("DNB:H", 1.80, (1, 1), 0.00),   # remboursé
+        ("AH:H:-0.25", 2.00, (1, 1), -0.50),  # demi-perte sur quart de ligne
+    )
+    for key, odds, goals, expected in cases:
+        book, _path, _ = _book_with(
+            _forecast("Club A", "Club B", market_key=key, odds=odds)
+        )
+        report = measure(book, results=[_played("Club A", "Club B", goals)])
+        profit = report.resolved[0].profit()
+        assert profit is not None
+        assert abs(profit - expected) < 1e-9, f"{key} {goals} → {profit}"
+
+
+def test_a_small_sample_refuses_to_conclude() -> None:
+    book, _path, _ = _book_with(
+        *(
+            _forecast(f"Club {i}", "Club B", market_key="1X2:H", odds=2.0)
+            for i in range(3)
+        )
+    )
+    results = [_played(f"Club {i}", "Club B", (2, 0)) for i in range(3)]
+    report = measure(book, results=results)
+    assert len(report.resolved) == 3
+    assert not report.conclusive
+    rendered = report.render()
+    assert "ÉCHANTILLON INSUFFISANT POUR CONCLURE" in rendered
+    assert "est du bruit" in rendered
+    # The figures are still printed — hiding them would be its own dishonesty.
+    assert "rendement observé" in rendered
+
+
+def test_the_closing_edge_measures_timing_and_says_so() -> None:
+    book, _path, _ = _book_with(
+        _forecast("Club A", "Club B", market_key="1X2:H", odds=2.20)
+    )
+    key = f"{_COMP}|{normalise('Club A')}|{normalise('Club B')}|2026-09-14"
+    report = measure(
+        book, results=[_played("Club A", "Club B", (1, 0))], closing={key: 2.00}
+    )
+    edge = report.resolved[0].closing_edge()
+    assert edge is not None and abs(edge - 0.10) < 1e-9
+    assert "Écart moyen au prix de clôture : +10.00%" in report.render()
+
+
+def test_without_a_closing_price_the_gap_is_reported_as_unmeasured() -> None:
+    book, _path, _ = _book_with(
+        _forecast("Club A", "Club B", market_key="1X2:H", odds=2.20)
+    )
+    report = measure(book, results=[_played("Club A", "Club B", (1, 0))])
+    assert report.resolved[0].closing_edge() is None
+    assert "reste non mesuré" in report.render()
+
+
+def test_measuring_writes_nothing_to_the_journal() -> None:
+    """Une mesure qui pourrait corriger la prévision ne mesurerait rien."""
+    book, path, before = _book_with(
+        _forecast("Club A", "Club B", market_key="1X2:H", odds=2.0)
+    )
+    measure(book, results=[_played("Club A", "Club B", (3, 1))]).render()
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_an_ambiguous_pairing_without_a_date_is_left_pending() -> None:
+    """Deux rencontres entre les mêmes équipes : en choisir une noterait la mauvaise."""
+    book, _path, _ = _book_with(_forecast("Club A", "Club B", date=""))
+    results = [
+        _played("Club A", "Club B", (1, 0), day=14),
+        _played("Club A", "Club B", (0, 3), day=21),
+    ]
+    report = measure(book, results=results)
+    assert not report.resolved
+    assert len(report.pending) == 1

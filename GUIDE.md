@@ -272,6 +272,7 @@ Extrait de la fiche :
 | `foot web` | la même chose dans le navigateur, en français ; `--jeton` pour un accès privé, `--certificat`/`--cle` pour HTTPS |
 | `foot suivre` | exécute le contrôle T−75/T−60 et réessaie jusqu'au coup d'envoi |
 | `foot journal` | relit les prévisions écrites avant match, jamais réécrites |
+| `foot mesurer` | apparie le journal aux résultats et le note — **sans rien y réécrire** |
 | `foot config` | quelles clés sont posées, ce qu'elles débloquent, ce qu'elles coûtent |
 | `foot fournisseurs` | sonde chaque source ; `--couverture` ajoute coût et accès réel |
 | `foot rubriques` | la grille des 22 rubriques et ce que chacune exige |

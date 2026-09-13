@@ -114,7 +114,11 @@ class ManualProvider:
         if matches is None and self._results_csv is not None:
             if not self._results_csv.exists():
                 raise CollectionError(f"fichier de résultats introuvable : {self._results_csv}")
-            matches = load_matches(self._results_csv)
+            # Stamped with the provider's own competition key, exactly as the
+            # calendar already is: a provider that declares it serves ``it.1``
+            # must not return matches labelled with nothing. Without this, a
+            # later measurement cannot join a forecast to its own result.
+            matches = load_matches(self._results_csv, competition=self._competition_key)
         if matches is None:
             matches = MatchLog()
         return SeasonData(
