@@ -626,6 +626,7 @@ engagement ; le logiciel ne souscrit à rien.
 | xG, npxG, tirs (`R07`, `R08`, `R09`, `R14`) | 4 rubriques bloquées | même adaptateur, ou une source xG dédiée |
 | Entraîneur et styles (`R12`) | rubrique bloquée | aucune source cataloguée |
 | Météo, pelouse, arbitre (`R15`) | rubrique bloquée | football-data.co.uk sert l'arbitre mais est **injoignable depuis cet environnement** (403 du proxy) |
+| **L'évaluation** du journal : calibration, erreurs, cotes de clôture, résultats | le journal **conserve** ; il ne **mesure** pas encore | une commande d'appariement journal × résultats × cotes de clôture. La moitié « conserver » de la demande est faite, la moitié « évaluer » ne l'est pas, et il serait malhonnête de la présenter autrement : sans plusieurs semaines de prévisions écrites avant match, il n'y aurait de toute façon rien à calibrer |
 
 Aucune de ces rubriques ne produit d'affirmation : le rapport les marque
 indisponibles et nomme, pour chacune, l'action exacte qui la lèverait —
