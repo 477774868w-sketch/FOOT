@@ -43,6 +43,7 @@ from foot.collect.registry import Registry
 from foot.collect.supplements import LineupRow, SupplementSet
 from foot.domain import Fixture
 from foot.provenance import Confidence, Evidence, Source, utcnow
+from foot.report.card import render_card
 from foot.report.web import make_handler, render_form
 
 PARIS = ZoneInfo("Europe/Paris")
@@ -534,3 +535,42 @@ def test_no_api_key_can_reach_a_rendered_page() -> None:
             os.environ.pop(CREDENTIAL, None)
         else:
             os.environ[CREDENTIAL] = previous
+
+
+# --------------------------------------------------------------------------- #
+# 5. Le prix retenu, son livre et son heure
+# --------------------------------------------------------------------------- #
+
+
+def test_the_chosen_price_carries_its_bookmaker_its_hour_and_its_floor() -> None:
+    """Un prix sans livre ni heure ne peut pas être repris — ni mesuré ensuite."""
+    as_of = dt.datetime(2026, 9, 13, 12, 0, tzinfo=PARIS)
+    result = run_journey(
+        _engine(),
+        matches=f"{_LINE} @ 2.10 3.40 6.00",
+        as_of=as_of,
+        bookmaker="Doublure",
+    )
+    card = render_card(result.run.analyses[0])
+    if "PARI PRINCIPAL" in card:
+        assert "chez Doublure" in card
+        assert "relevée 13/09 12:00" in card
+        assert "cote minimale" in card
+        floor = next(
+            line for line in card.splitlines() if "cote minimale" in line
+        )
+        assert "ne remplit plus les critères déclarés" in floor
+
+
+def test_a_price_from_another_book_stays_labelled_all_the_way_to_the_card() -> None:
+    """« ≠ demandé » doit survivre jusqu'à l'écran, pas mourir dans l'adaptateur."""
+    as_of = dt.datetime(2026, 9, 13, 12, 0, tzinfo=PARIS)
+    result = run_journey(
+        _engine(),
+        matches=f"{_LINE} @ 2.10 3.40 6.00",
+        as_of=as_of,
+        bookmaker="Pinnacle (≠ Betclic demandé)",
+    )
+    card = render_card(result.run.analyses[0])
+    if "PARI PRINCIPAL" in card:
+        assert "≠ Betclic demandé" in card

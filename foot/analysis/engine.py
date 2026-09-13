@@ -64,6 +64,7 @@ from foot.collect.base import (
     SeasonData,
     SeasonSource,
 )
+from foot.collect.catalogue import PROVIDER_CATALOGUE
 from foot.collect.openfootball import COMPETITIONS, resolve_competition
 from foot.collect.registry import Registry, RegistryReport
 from foot.collect.supplements import FULL_LINEUP, LineupRow, SupplementSet
@@ -1158,8 +1159,13 @@ class Engine:
         available = frozenset(
             c for s in report.statuses if s.usable for c in s.capabilities
         )
+        # Built from the catalogue rather than hard-coded: a list of module
+        # names kept by hand goes stale the day an adapter is written, and then
+        # the report tells the operator « aucun adaptateur » about code that
+        # exists and only wants a key.
         adapters_built = frozenset(
-            {"foot.collect.openfootball", "foot.collect.footballdata", "foot.collect.manual"}
+            {card.adapter for card in PROVIDER_CATALOGUE if card.built}
+            | {"foot.collect.manual"}
         )
         by_rubric: dict[int, list[Finding]] = {}
         for finding in findings:
@@ -1179,8 +1185,8 @@ class Engine:
             if gap:
                 blocker = {
                     RubricImplementation.BUILT_UNREACHABLE: (
-                        f"adaptateur {rubric.adapter} écrit mais injoignable ici "
-                        f"(manque : {', '.join(sorted(c.value for c in gap))})"
+                        f"adaptateur {rubric.adapter} écrit ; "
+                        + _capability_remedy(gap)
                     ),
                     RubricImplementation.OPERATOR_SUPPLIED: (
                         _unusable_import(rubric, supplied)
@@ -1872,3 +1878,37 @@ def _counter_analysis(
             f"conclut l'inverse — prudence, les deux lectures divergent."
         )
     return tuple(lines)
+
+
+def _capability_remedy(gap: frozenset[Capability]) -> str:
+    """Say, per missing capability, what would actually lift it.
+
+    « Injoignable » is three different situations with three different next
+    moves: a key to paste, a network route to open, or code still to write.
+    The catalogue knows which, because it has measured it.
+    """
+    parts: list[str] = []
+    for capability in sorted(gap, key=lambda c: c.value):
+        cards = [c for c in PROVIDER_CATALOGUE if capability in c.declared]
+        built = [c for c in cards if c.built]
+        keyed = [c for c in built if c.credential_present()]
+        if keyed:
+            parts.append(
+                f"{capability.value} : accès réseau à ouvrir vers "
+                f"{', '.join(c.name for c in keyed)}"
+            )
+        elif built:
+            names = ", ".join(
+                f"{c.credential} pour {c.name}" for c in built if c.credential
+            )
+            parts.append(
+                f"{capability.value} : clé à fournir ({names}) — voir « foot config »"
+            )
+        elif cards:
+            parts.append(
+                f"{capability.value} : adaptateur à écrire pour "
+                f"{', '.join(c.name for c in cards)}"
+            )
+        else:
+            parts.append(f"{capability.value} : aucun fournisseur catalogué")
+    return " ; ".join(parts)

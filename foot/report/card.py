@@ -12,8 +12,11 @@ and **confidence is not probability**.
 
 from __future__ import annotations
 
+from zoneinfo import ZoneInfo
+
 from foot.analysis.dossier import FindingKind
 from foot.analysis.engine import MatchAnalysis
+from foot.analysis.request import resolve_timezone
 from foot.analysis.rubrics import RubricImplementation, RubricStatus
 from foot.markets.selection import DecisionStatus
 
@@ -25,7 +28,8 @@ _REMEDIES: tuple[tuple[RubricImplementation, str], ...] = (
     (RubricImplementation.NOT_BUILT, "aucun adaptateur écrit à ce jour"),
     (
         RubricImplementation.BUILT_UNREACHABLE,
-        "adaptateur écrit, accès réseau à ouvrir",
+        "adaptateur écrit ; une clé ou un accès réseau l'activerait "
+        "(« foot config » et « foot fournisseurs --couverture » disent lequel)",
     ),
     (
         RubricImplementation.OPERATOR_SUPPLIED,
@@ -34,6 +38,11 @@ _REMEDIES: tuple[tuple[RubricImplementation, str], ...] = (
     (RubricImplementation.OPERATIONAL, "donnée attendue mais absente de la source"),
 )
 """Each unavailability state with the action that would actually lift it."""
+
+
+def _zone(name: str) -> ZoneInfo:
+    """The run's timezone, so a quoting hour is shown where the operator lives."""
+    return resolve_timezone(name)
 
 
 def _rule(char: str = "─") -> str:
@@ -139,7 +148,25 @@ def render_card(analysis: MatchAnalysis, *, detailed: bool = True) -> str:
         main = decision.main
         odds = main.offer.odds
         lines.append(f"  PARI PRINCIPAL     {main.offer.label}")
-        lines.append(f"  cote               {odds:.2f}" if odds else "  cote               —")
+        book = main.offer.bookmaker or "bookmaker non précisé"
+        quoted = main.priced.quoted_at
+        moment = (
+            quoted.astimezone(_zone(resolved.timezone)).strftime("%d/%m %H:%M %Z")
+            if quoted
+            else "heure de relevé inconnue"
+        )
+        lines.append(
+            f"  cote               {odds:.2f}  chez {book}  (relevée {moment})"
+            if odds
+            else "  cote               —"
+        )
+        floor = main.priced.profile.odds_for_expected_value(
+            decision.criteria.min_expected_value
+        )
+        lines.append(
+            f"  cote minimale      {floor:.2f} — en dessous, ce pari ne remplit "
+            f"plus les critères déclarés"
+        )
         lines.append(
             f"  probabilité        {main.priced.win_probability * 100:.1f}%"
             + (

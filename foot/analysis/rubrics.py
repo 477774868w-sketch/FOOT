@@ -323,7 +323,8 @@ RUBRICS: tuple[Rubric, ...] = (
        effect="aucun : explicitement déclaré indisponible plutôt qu'approché",
        sections=("§21",)),
     _r(10, "Gardien titulaire, remplaçant et indicateurs", RubricPhase.SPORT,
-        [Capability.LINEUPS], operator_import="--compositions-csv",
+        [Capability.LINEUPS], adapter="foot.collect.footballdata_org",
+        operator_import="--compositions-csv",
         treatment="relevé du gardien annoncé et de son statut (probable / officiel)",
         effect="un changement de gardien déclenche une réévaluation du dossier",
        sections=("§8",)),
@@ -378,7 +379,7 @@ RUBRICS: tuple[Rubric, ...] = (
                "un pari ; l'incertitude d'estimation est rapportée, pas filtrante",
        sections=("§13",)),
     _r(19, "Comparaison des marchés disponibles", RubricPhase.MARKET,
-        [Capability.ODDS], adapter="foot.collect.footballdata",
+        [Capability.ODDS], adapter="foot.collect.oddsapi",
         operator_import="cotes saisies (1=, N=, 2=, BTTS:, TOTAL:, DC:, DNB:, AH:, TE:)",
         treatment="chaque cote fournie est réglée sur la même loi jointe, "
                   "remboursements et demi-règlements compris",
@@ -391,7 +392,8 @@ RUBRICS: tuple[Rubric, ...] = (
         effect="seuils de prix résolus sur le profil de règlement exact",
        sections=("§14",)),
     _r(21, "Compositions probables puis officielles, et réévaluation", RubricPhase.MARKET,
-        [Capability.LINEUPS], operator_import="--compositions-csv",
+        [Capability.LINEUPS], adapter="foot.collect.footballdata_org",
+        operator_import="--compositions-csv",
         treatment="contrôles planifiés à T−75 et T−60, statut probable puis officiel",
         effect="un changement décisif produit un nouveau dossier scellé qui "
                "remplace l'ancien, avec sa raison",

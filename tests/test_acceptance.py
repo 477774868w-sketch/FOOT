@@ -277,13 +277,21 @@ def test_an_unreachable_source_blocks_its_rubrics_without_inventing_data() -> No
     assert analysis.analysed
     unavailable = [a for a in analysis.rubrics if a.blocker]
     assert unavailable, "aucune rubrique marquée indisponible alors que xG et compositions manquent"
-    # The blocker now states *which* of the three situations applies, so the
-    # operator can tell "never written" from "written but unreachable" from
-    # "supply it yourself".
+    # The blocker states *which* situation applies, so the operator can tell
+    # "never written" from "written but wants a key" from "written but the
+    # network is closed" from "supply it yourself". Four different next moves,
+    # named, rather than one word covering all of them.
     for assessment in unavailable:
         assert any(
             marker in assessment.blocker
-            for marker in ("aucun adaptateur écrit", "injoignable", "aucune source automatique")
+            for marker in (
+                "aucun adaptateur écrit",
+                "adaptateur à écrire",
+                "clé à fournir",
+                "accès réseau à ouvrir",
+                "aucune source automatique",
+                "aucun fournisseur catalogué",
+            )
         ), assessment.blocker
         assert not assessment.summary, "une rubrique bloquée ne doit rien affirmer"
         assert assessment.implementation is not RubricImplementation.OPERATIONAL
