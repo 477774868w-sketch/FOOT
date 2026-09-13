@@ -699,6 +699,14 @@ composition que personne n'a publiée. À heure de publication égale, la saisie
 l'opérateur tient ; une feuille réellement postérieure la remplace, et la
 précédente reste visible comme version remplacée.
 
+**Le recoupement est dit, jamais sous-entendu.** Chaque fiche porte désormais
+une ligne « recoupement » : combien de faits décisifs reposent sur deux
+fournisseurs **indépendants**, et combien sur une source unique. Sans elle,
+l'absence de contradiction se lisait comme un accord — alors qu'avec un seul
+fournisseur joignable, il n'y a rien à recouper. Le décompte porte sur les
+fournisseurs, jamais sur les URL : un même flux republié cinq fois reste une
+source, et un test le vérifie.
+
 **Une suggestion doit ressembler à ce qui a été tapé.** Le seuil des
 suggestions passe de 0,45 à 0,55 : à 0,45, « Machin » proposait Milan, Monaco et
 Manchester City, ce qui, sur un téléphone, invite à choisir l'une des trois. À

@@ -308,11 +308,38 @@ def render_card(analysis: MatchAnalysis, *, detailed: bool = True) -> str:
     contradictions = analysis.ledger.contradictions()
     if contradictions:
         lines.append(f"  ⚠ contradictions non résolues : {', '.join(sorted(contradictions))}")
+    lines.append(f"  recoupement : {_corroboration(analysis)}")
     if analysis.ledger.entries:
         lines.append("  sources décisives :")
         for entry in analysis.ledger.entries[:6]:
             lines.append(f"    {entry.render()}")
     return "\n".join(lines)
+
+
+def _corroboration(analysis: MatchAnalysis) -> str:
+    """Say how many decisive facts two independent providers actually agree on.
+
+    Silence here would be read as agreement.  It is not: with one reachable
+    provider there is nothing to cross-check, and the absence of a contradiction
+    proves nothing at all.  Distinct *providers* are counted, never distinct
+    URLs — one feed republished five times is one source.
+    """
+    ledger = analysis.ledger
+    keys = ledger.keys()
+    if not keys:
+        return "aucun fait au registre"
+    crossed = sum(1 for key in keys if ledger.independent_sources(key) > 1)
+    alone = len(keys) - crossed
+    if not crossed:
+        return (
+            f"aucun des {len(keys)} faits ne repose sur deux fournisseurs "
+            f"indépendants — l'absence de contradiction n'est donc pas une "
+            f"confirmation"
+        )
+    return (
+        f"{crossed} fait(s) confirmé(s) par deux fournisseurs indépendants, "
+        f"{alone} sur une source unique"
+    )
 
 
 def render_rubric_grid(analysis: MatchAnalysis) -> str:

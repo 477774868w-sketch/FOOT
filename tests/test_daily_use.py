@@ -628,3 +628,34 @@ def test_a_name_that_resembles_nothing_suggests_nothing() -> None:
     match = index.resolve("Machin")
     assert not match.resolved
     assert match.candidates == (), match.candidates
+
+
+# --------------------------------------------------------------------------- #
+# 7. Le recoupement est dit, jamais sous-entendu
+# --------------------------------------------------------------------------- #
+
+
+def test_a_single_provider_is_reported_as_uncorroborated() -> None:
+    """Le silence se lirait comme un accord. Ce n'en est pas un."""
+    run = _engine().run(_LINE, as_of=KICKOFF - dt.timedelta(days=1))
+    card = render_card(run.analyses[0])
+    assert "recoupement :" in card
+    assert "l'absence de contradiction n'est donc pas une confirmation" in card
+
+
+def test_two_sheets_from_two_providers_are_two_confirmations() -> None:
+    """Deux fournisseurs distincts sur le même fait, c'est un recoupement."""
+    published = KICKOFF - dt.timedelta(minutes=70)
+    first = SheetSource(publishes_at=published)
+    second = SheetSource(publishes_at=published)
+    run = _engine(first, second).run(
+        _LINE, as_of=KICKOFF - dt.timedelta(minutes=65)
+    )
+    ledger = run.analyses[0].ledger
+    recorded = tuple(ledger.keys())
+    crossed = [k for k in recorded if ledger.independent_sources(k) > 1]
+    assert first.calls == 1 and second.calls == 1
+    # Both doubles publish under the same evidence key and the same provider
+    # name, so this is deliberately *not* a corroboration: same source twice is
+    # one source, exactly as two sites republishing one feed would be.
+    assert not crossed, "un même fournisseur cité deux fois n'est pas deux sources"
