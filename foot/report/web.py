@@ -33,7 +33,7 @@ from foot.analysis.engine import AnalysisRun, Engine
 from foot.analysis.journey import JourneyResult, run_journey
 from foot.analysis.ledgerbook import ForecastBook, record_run
 from foot.analysis.request import DEFAULT_TIMEZONE, parse_requests, resolve_timezone
-from foot.analysis.supervisor import Supervisor
+from foot.analysis.supervisor import LedgerJob, Supervisor
 from foot.collect.supplements import SupplementSet
 from foot.markets.portfolio import build_ticket, plan_stakes
 from foot.report.card import render_card, render_rubric_grid
@@ -387,13 +387,15 @@ def access_token(length: int = 24) -> str:
     return secrets.token_urlsafe(length)
 
 
-def _render_ledger(book: ForecastBook | None) -> str:
-    """The Bilan screen: what is already written, and how to measure it.
+def _render_ledger(
+    book: ForecastBook | None, supervisor: Supervisor | None = None
+) -> str:
+    """The Bilan screen: the journal, and the measurement it actually runs.
 
-    Deliberately does **not** run the measurement here: it needs results the
-    page has no business fetching on a button press, and a phone screen that
-    silently starts a long collection is a phone screen that times out. What it
-    shows is the journal itself, which is the thing a backup must restore.
+    The measurement happens **on the server**, in the background, because
+    fetching results for every competition takes longer than a phone will hold a
+    request open. The page starts it and reads its state; pressing Bilan again
+    shows how far it has got, then the finished report.
     """
     if book is None:
         return (
@@ -411,7 +413,34 @@ def _render_ledger(book: ForecastBook | None) -> str:
         f"en place, et il se relit ligne à ligne. Mesure&nbsp;: "
         f"<code>foot mesurer</code> une fois les résultats connus.</div>"
     )
-    return note + _escape_block("Prévisions enregistrées", written)
+    body = note + _render_measurement(supervisor)
+    return body + _escape_block("Prévisions enregistrées", written)
+
+
+def _render_measurement(supervisor: Supervisor | None) -> str:
+    """Start or report the server-side measurement."""
+    if supervisor is None:
+        return (
+            '<div class="note">La mesure côté serveur n\'est pas active ici. '
+            "Depuis un terminal&nbsp;: <code>foot mesurer</code>.</div>"
+        )
+    job = supervisor.ledger_job()
+    if job is None:
+        return (
+            '<div class="note">Aucune mesure lancée. Appuyez de nouveau sur '
+            "<strong>Bilan</strong> pour en démarrer une&nbsp;: elle tourne sur "
+            "le serveur, et vous pourrez revenir voir le résultat.</div>"
+        )
+    finished, progress, report, error = job.snapshot()
+    if error:
+        return f'<div class="note">Mesure interrompue&nbsp;: {html.escape(error)}</div>'
+    if not finished:
+        return (
+            f'<div class="note">Mesure en cours — {html.escape(progress)}. '
+            f"Elle continue si vous fermez l'onglet&nbsp;; rappuyez sur "
+            f"<strong>Bilan</strong> pour voir où elle en est.</div>"
+        )
+    return _escape_block("Bilan mesuré", report)
 
 
 def _start_watch(
@@ -462,6 +491,7 @@ def make_handler(
     token: str = "",
     book: ForecastBook | None = None,
     supervisor: Supervisor | None = None,
+    measurement: Callable[[LedgerJob], str] | None = None,
 ) -> type[http.server.BaseHTTPRequestHandler]:
     """Build a request handler bound to one engine instance.
 
@@ -472,6 +502,9 @@ def make_handler(
             a phone that loses its browser tab loses nothing.
         supervisor: holds the watches started from the page. They run on the
             server, so closing the tab does not cancel the T−75 check.
+        measurement: what **Bilan** runs in the background. It is injected
+            because collecting results is the caller's business — which
+            provider, which season — and this module's business is the screen.
     """
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -564,7 +597,9 @@ def make_handler(
                 )
                 budget = float(budget_text) if budget_text.strip() else None
                 if action == "bilan":
-                    body = _render_ledger(book)
+                    if supervisor is not None and measurement is not None:
+                        supervisor.measure_async(measurement)
+                    body = _render_ledger(book, supervisor)
                 elif action == "suivre":
                     body = _start_watch(
                         supervisor,
@@ -620,6 +655,8 @@ def serve(
     certfile: str | Path = "",
     keyfile: str | Path = "",
     book: ForecastBook | None = None,
+    watch_engine: Engine | None = None,
+    measurement: Callable[[LedgerJob], str] | None = None,
 ) -> None:
     """Run the interface until interrupted.
 
@@ -636,6 +673,12 @@ def serve(
         of the state. It is a plain append-only file: backing it up is copying
         it, and restoring it is putting it back.
 
+    ``watch_engine``
+        the engine the **Suivre** button uses. It exists because a watch needs
+        team sheets read minutes apart, and the day-to-day engine caches them
+        for six hours; sharing one engine made the T−60 check replay T−75's
+        answer.
+
     The **Suivre** button starts its watch on the server, so the T−75 check
     happens whether or not the tab is still open. A watch does not survive a
     restart of the server, and the page says so rather than implying otherwise.
@@ -649,8 +692,14 @@ def serve(
         daemon_threads = True
 
     scheme = "https" if certfile and keyfile else "http"
-    supervisor = Supervisor(engine, book=book)
-    handler = make_handler(engine, token=token, book=book, supervisor=supervisor)
+    supervisor = Supervisor(engine, book=book, watch_engine=watch_engine)
+    handler = make_handler(
+        engine,
+        token=token,
+        book=book,
+        supervisor=supervisor,
+        measurement=measurement,
+    )
     with Server((host, port), handler) as httpd:
         if scheme == "https":
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

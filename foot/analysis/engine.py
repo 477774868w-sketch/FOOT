@@ -1742,13 +1742,22 @@ def _dataset_evidence(provider: SeasonSource, data: SeasonData) -> list[Evidence
     key = f"résultats::{data.competition}::{data.season}" if data.season else (
         f"résultats::{data.competition}"
     )
+    # Zero played matches is not missing data: a season that has not started
+    # yet is a *confirmed* fact, and the fixtures prove the fetch worked. Only a
+    # response carrying neither results nor fixtures is unavailable — and then it
+    # carries no value, which the ledger enforces.
+    served = bool(data.played) or bool(data.fixtures)
     return [
         Evidence(
             key=key,
-            value=f"{len(data.played)} matchs joués, {len(data.fixtures)} à venir",
+            value=(
+                f"{len(data.played)} matchs joués, {len(data.fixtures)} à venir"
+                if served
+                else None
+            ),
             source=source,
             retrieved_at=data.retrieved_at,
-            status=Confidence.CONFIRMED if data.played else Confidence.UNAVAILABLE,
+            status=Confidence.CONFIRMED if served else Confidence.UNAVAILABLE,
             fact_date=data.played.end if data.played else None,
             note=data.label,
         )

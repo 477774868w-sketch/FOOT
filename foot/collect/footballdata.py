@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import csv
 import io
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from foot.collect.base import (
     Capability,
@@ -33,9 +33,31 @@ from foot.domain import Fixture, Match, MatchLog, Score
 from foot.market.odds import MatchOdds
 from foot.provenance import Confidence, Evidence, Source, utcnow
 
-__all__ = ["DIVISIONS", "FootballDataProvider"]
+__all__ = [
+    "COMPETITION_KEYS",
+    "DIVISIONS",
+    "DIVISION_FOR_KEY",
+    "FootballDataProvider",
+]
 
 _BASE = "https://www.football-data.co.uk/mmz4281"
+
+COMPETITION_KEYS: dict[str, str] = {
+    "E0": "en.1",
+    "SP1": "es.1",
+    "D1": "de.1",
+    "I1": "it.1",
+    "F1": "fr.1",
+}
+"""Archive divisions mapped onto **our** competition keys.
+
+The archive names a division ``I1`` and our journal names it ``it.1``. Returning
+the human label « Serie A (Italie) » as a competition identifier meant no closing
+price could ever be joined to a forecast: the identity simply did not match.
+Divisions absent from this map have no key here, and are reported as such.
+"""
+
+DIVISION_FOR_KEY: dict[str, str] = {key: code for code, key in COMPETITION_KEYS.items()}
 
 DIVISIONS: dict[str, str] = {
     "E0": "Premier League (Angleterre)",
@@ -155,7 +177,7 @@ class FootballDataProvider:
                         away=row["AwayTeam"].strip(),
                         date=date,
                         score=Score(int(float(row["FTHG"])), int(float(row["FTAG"]))),
-                        competition=DIVISIONS[competition],
+                        competition=COMPETITION_KEYS.get(competition, competition),
                     )
                 )
             except (KeyError, ValueError):
@@ -198,10 +220,36 @@ class FootballDataProvider:
     def odds(
         self, competition: str = "E0", season: str = "2024-25"
     ) -> tuple[dict[Fixture, MatchOdds], list[Evidence]]:
-        """Closing 1X2 prices keyed by fixture."""
+        """**Closing** 1X2 prices keyed by fixture, when the file carries them.
+
+        The archive publishes two prices per bookmaker: the opening one
+        (``B365H``) and the closing one (``B365CH``). Reading the first and
+        calling it a closing price overstates by exactly the market's movement —
+        the quantity a closing comparison exists to measure. The closing columns
+        are used, and a file that has none yields **nothing** rather than an
+        opening price wearing a closing label.
+        """
         rows, retrieved_at = self._rows(competition, season)
         source = self.source(self.url_for(competition, season))
-        columns = (f"{self._bookmaker}H", f"{self._bookmaker}D", f"{self._bookmaker}A")
+        columns = _closing_columns(self._bookmaker, rows)
+        if columns is None:
+            return (
+                {},
+                [
+                    Evidence(
+                        key=f"clôture::{competition}::{season}",
+                        value=None,
+                        source=source,
+                        retrieved_at=retrieved_at,  # type: ignore[arg-type]
+                        status=Confidence.UNAVAILABLE,
+                        note=(
+                            f"aucune colonne de clôture pour {self._bookmaker} dans "
+                            f"ce fichier (attendu {self._bookmaker}CH/CD/CA) : les "
+                            f"cotes d'ouverture ne sont pas des cotes de clôture"
+                        ),
+                    )
+                ],
+            )
         book: dict[Fixture, MatchOdds] = {}
         evidence: list[Evidence] = []
         for row in rows:
@@ -210,7 +258,7 @@ class FootballDataProvider:
                     home=row["HomeTeam"].strip(),
                     away=row["AwayTeam"].strip(),
                     date=parse_date(row["Date"]),
-                    competition=DIVISIONS[competition],
+                    competition=COMPETITION_KEYS.get(competition, competition),
                 )
                 prices = [float(row[column]) for column in columns]
             except (KeyError, ValueError):
@@ -230,3 +278,20 @@ class FootballDataProvider:
                 )
             )
         return book, evidence
+
+
+def _closing_columns(
+    bookmaker: str, rows: Sequence[Mapping[str, str]]
+) -> tuple[str, str, str] | None:
+    """The three closing columns for one bookmaker, or ``None`` if absent.
+
+    ``B365CH`` is Bet365's closing home price; ``B365H`` is its opening one.
+    Recent files carry both, older ones only the opening columns — and an
+    opening price presented as a closing price would make every timing
+    measurement read better than it is.
+    """
+    if not rows:
+        return None
+    header = set(rows[0].keys())
+    closing = (f"{bookmaker}CH", f"{bookmaker}CD", f"{bookmaker}CA")
+    return closing if all(column in header for column in closing) else None

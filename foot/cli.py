@@ -19,9 +19,10 @@ from foot.analysis.closing import load_closing_csv, load_closing_from_sources
 from foot.analysis.engine import Engine, EngineConfig
 from foot.analysis.journey import JourneyResult, run_journey
 from foot.analysis.ledgerbook import DEFAULT_BOOK, ForecastBook, record_run
-from foot.analysis.measure import ClosingPrices, measure
+from foot.analysis.measure import ClosingPrices, measure, measure_journal
 from foot.analysis.request import DEFAULT_TIMEZONE, resolve_timezone
 from foot.analysis.rubrics import RUBRICS
+from foot.analysis.supervisor import LedgerJob
 from foot.analysis.watch import WATCH_CACHE_TTL, WatchPlan, watch_until_kickoff
 from foot.collect import (
     Cache,
@@ -32,8 +33,8 @@ from foot.collect import (
     Registry,
 )
 from foot.collect.base import (
+    ClosingSource,
     CollectionError,
-    OddsSource,
     ProviderStatus,
     Reachability,
     SeasonData,
@@ -758,6 +759,10 @@ def command_web(args: argparse.Namespace) -> int:
         certfile=args.certificat or "",
         keyfile=args.cle or "",
         book=ForecastBook(args.journal) if args.journal else None,
+        watch_engine=_watch_engine(args),
+        measurement=_measurement_task(args, engine)
+        if args.journal
+        else None,
     )
     return 0
 
@@ -774,16 +779,7 @@ def command_suivre(args: argparse.Namespace) -> int:
     kickoff = dt.datetime.fromisoformat(args.coup_denvoi)
     if kickoff.tzinfo is None:
         kickoff = kickoff.replace(tzinfo=zone)
-    # A watch needs sheets that are actually fresh: the day-to-day six-hour
-    # cache would serve T−75's "nothing yet" answer again at T−60.
-    args.cache_ttl = WATCH_CACHE_TTL
-    engine = Engine(
-        _build_registry(args),
-        config=EngineConfig(
-            timezone=args.fuseau,
-            rubrics_path=Path(args.protocole) if args.protocole else None,
-        ),
-    )
+    engine = _watch_engine(args)
     plan = WatchPlan(
         kickoff=kickoff,
         timezone=args.fuseau,
@@ -882,7 +878,7 @@ def _closing_prices(
         return load_closing_csv(
             args.clotures_csv, bookmaker=getattr(args, "bookmaker", "") or ""
         )
-    sources = [p for p in registry if isinstance(p, OddsSource)]
+    sources = [p for p in registry if isinstance(p, ClosingSource)]
     return load_closing_from_sources(
         sources, competitions=competitions, seasons=tuple(args.saisons)
     )
@@ -894,6 +890,65 @@ def _season_for(engine: Engine, competition: str, season: str) -> SeasonData:
         if competition in provider.competitions():
             return provider.season(competition, season)
     raise CollectionError(f"aucun fournisseur ne sert {competition}")
+
+
+def _measurement_task(
+    args: argparse.Namespace, engine: Engine
+) -> Callable[[LedgerJob], str]:
+    """What the phone's **Bilan** button runs, on the server, in the background.
+
+    The same collection the terminal does, reporting its progress as it goes —
+    because fetching results for every competition in a journal takes longer
+    than a phone will hold a request open.
+    """
+    book = ForecastBook(args.journal)
+
+    def task(job: LedgerJob) -> str:
+        def results_for(competition: str) -> list[Match]:
+            found: list[Match] = []
+            for season in args.saisons:
+                try:
+                    found.extend(_season_for(engine, competition, season).played)
+                except (CollectionError, ValueError, KeyError):
+                    continue
+            return found
+
+        def progress(step: str) -> None:
+            with job.lock:
+                job.progress = step
+
+        closing = _closing_prices(
+            args, _build_registry(args), sorted({f.competition for f in book})
+        )
+        report = measure_journal(
+            book,
+            results_for=results_for,
+            closing=closing,
+            progress=progress,
+        )
+        return f"Clôtures : {closing.render()}\n\n{report.render()}"
+
+    return task
+
+
+def _watch_engine(args: argparse.Namespace) -> Engine:
+    """The engine a watch must use — one policy, both surfaces.
+
+    A watch reads team sheets minutes apart. Reading them through the day-to-day
+    six-hour cache makes the T−60 check replay T−75's answer, which is the
+    difference between a check and a re-print. Both ``foot suivre`` and the web
+    interface's **Suivre** button build their engine here, so neither can drift
+    back to the ordinary freshness.
+    """
+    watching = argparse.Namespace(**vars(args))
+    watching.cache_ttl = WATCH_CACHE_TTL
+    return Engine(
+        _build_registry(watching),
+        config=EngineConfig(
+            timezone=getattr(args, "fuseau", DEFAULT_TIMEZONE),
+            rubrics_path=Path(args.protocole) if args.protocole else None,
+        ),
+    )
 
 
 def command_journal(args: argparse.Namespace) -> int:

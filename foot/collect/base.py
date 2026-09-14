@@ -24,6 +24,7 @@ from foot.provenance import Evidence, Source, utcnow
 
 __all__ = [
     "Capability",
+    "ClosingSource",
     "CollectionError",
     "LineupSource",
     "MarketSource",
@@ -240,6 +241,30 @@ class OddsSource(Protocol):
 
     def quoted_at(self) -> dt.datetime | None:
         """When those prices were observed, when the source knows it."""
+
+
+@runtime_checkable
+class ClosingSource(Protocol):
+    """A source of **archived closing prices**, addressable by competition-season.
+
+    Distinct from :class:`OddsSource`, whose ``odds()`` takes no argument and
+    means "whatever you can quote right now". An archive must be *asked* for a
+    competition and a season: calling it bare let it answer with its own
+    defaults, so a request for Serie A 2026-27 came back with English prices from
+    two seasons earlier — silently, and with the wrong identities attached.
+    """
+
+    @property
+    def name(self) -> str:
+        """Identifier used in reports."""
+
+    def competitions(self) -> Sequence[str]:
+        """Division codes this archive serves."""
+
+    def odds(
+        self, competition: str, season: str
+    ) -> tuple[dict[Fixture, MatchOdds], list[Evidence]]:
+        """Closing prices for one competition-season."""
 
 
 @runtime_checkable

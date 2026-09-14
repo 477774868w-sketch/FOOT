@@ -194,7 +194,8 @@ def watch_until_kickoff(
         sleep: injected for the same reason. A watch that cannot be tested
             without waiting an hour would never be tested.
         quoted_at: when the operator's prices were actually observed. Defaults
-            to the first check, which is when they were handed over. It does
+            to the instant the watch **starts**, which is when they were typed —
+            not to the first check, which may be hours later. It does
             **not** advance with the checks: re-running the analysis at 19:45
             does not make a price read at 19:30 fifteen minutes fresher, and
             letting it would have hidden exactly the staleness the freshness
@@ -209,8 +210,10 @@ def watch_until_kickoff(
     pause = sleep or _sleep
     report = WatchReport(fixture=_label(matches), plan=plan)
     previous: str | None = None
-    # Fixed once, before the loop: the instant the operator's prices were seen.
-    priced_at = quoted_at
+    # Fixed once, at launch: the instant the operator handed the prices over. A
+    # watch armed at 15:45 for a 20:45 kick-off was dating them 19:30, which
+    # made a four-hour-old price look freshly read.
+    priced_at = quoted_at if quoted_at is not None else clock()
 
     for due in plan.due_times():
         if len(report.attempts) >= max_attempts:
@@ -220,12 +223,11 @@ def watch_until_kickoff(
         if current > plan.kickoff:
             report.stopped_because = "coup d'envoi passé"
             break
-        if due > current:
-            pause((due - current).total_seconds())
-            current = clock()
-        if priced_at is None:
-            # The first check is when the operator handed the prices over.
-            priced_at = current
+        # Sleep until the due time is *actually* reached. One pause was not
+        # enough: the sleeper caps each wait at an hour, so a watch armed five
+        # hours early woke at 16:45 and ran the T−75 check there — three hours
+        # early, on a squad sheet nobody had published yet.
+        current = _wait_until(due, clock=clock, pause=pause, kickoff=plan.kickoff)
         if current > plan.kickoff:
             report.stopped_because = "coup d'envoi passé"
             break
@@ -256,6 +258,29 @@ def watch_until_kickoff(
         if not report.stopped_because:
             report.stopped_because = "fin de la fenêtre de contrôle"
     return report
+
+
+def _wait_until(
+    due: dt.datetime,
+    *,
+    clock: Callable[[], dt.datetime],
+    pause: Callable[[float], None],
+    kickoff: dt.datetime,
+) -> dt.datetime:
+    """Sleep in bounded steps until ``due`` is reached, kick-off, or a stall.
+
+    Returns the instant actually reached. A clock that stops advancing ends the
+    wait rather than spinning: in a test that is a fixed clock, and in
+    production it would be a broken one — neither should loop forever.
+    """
+    current = clock()
+    while current < due and current <= kickoff:
+        pause((due - current).total_seconds())
+        moved = clock()
+        if moved <= current:
+            return moved
+        current = moved
+    return current
 
 
 def _observe(

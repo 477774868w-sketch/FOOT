@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -50,6 +50,7 @@ __all__ = [
     "ResolvedForecast",
     "closing_key",
     "measure",
+    "measure_journal",
 ]
 
 _MIN_FOR_INTERVAL = 10
@@ -94,6 +95,33 @@ class ClosingPrices:
     def get(self, key: str) -> float | None:
         return self.prices.get(key)
 
+    def lookup(
+        self,
+        *,
+        competition: str,
+        home: str,
+        away: str,
+        date: dt.date,
+        market: str,
+        bookmaker: str,
+    ) -> tuple[float, str] | None:
+        """The close for this market: same book first, market reference after.
+
+        Returns the price **and how it was matched**, because « the same book's
+        close » and « some book's close » are different comparisons and must not
+        be averaged into one number.
+        """
+        if bookmaker:
+            same = self.get(
+                closing_key(competition, home, away, date, market, bookmaker)
+            )
+            if same is not None:
+                return (same, f"même bookmaker ({bookmaker})")
+        reference = self.get(closing_key(competition, home, away, date, market))
+        if reference is not None:
+            return (reference, "référence de marché (autre bookmaker)")
+        return None
+
     def render(self) -> str:
         if self.state is ClosingState.NOT_WIRED:
             return (
@@ -118,6 +146,7 @@ class ResolvedForecast:
     """Closing price of the **same market**, when a source served one."""
 
     closing_book: str = ""
+    """How the closing price was matched — same bookmaker, or market reference."""
 
     score_date: dt.date | None = None
     """Date of the match actually joined — the identity a duplicate collides on."""
@@ -346,10 +375,14 @@ class Measurement:
                     "retenu : l'écart au prix de clôture reste non mesuré."
                 )
         else:
+            kinds = sorted(
+                {r.closing_book for r in self.resolved if r.closing_edge() is not None}
+            )
             lines.append(
                 f"  Écart moyen au prix de clôture : {edge * 100:+.2f}% "
                 f"(mesure du moment choisi, pas de la prévision)"
             )
+            lines.append(f"    comparé à : {', '.join(kinds)}")
 
         lines.append("")
         interval = self.rps_interval()
@@ -416,9 +449,11 @@ def measure(
             reference that could genuinely have been fielded on the day.
         closing: closing prices **and the reason when there are none** — not
             wired, unreachable, or served but silent on this fixture.
-        as_of: report cut-off. A forecast recorded after it is excluded — asking
-            for "the report as it stood on 14 September" must not be answered
-            with a line written on the 15th.
+        as_of: report cut-off, applied to **both sides**. A forecast recorded
+            after it is excluded, and a match not yet played at that instant
+            stays pending: asking for "the report as it stood on 14 September"
+            must not be answered with a line written on the 15th, nor with the
+            result of a match played on the 21st.
         include_retrospective: whether replays — forecasts written after their
             own kick-off — join the score. Off by default: they are useful, and
             they are not forecasts anybody stood behind beforehand.
@@ -426,8 +461,15 @@ def measure(
     Among the admissible lines, the **latest by ``as_of``** is scored, not the
     last one appended: a journal is a file, and file order is not chronology.
     """
+    # The cut-off gates the **results** too. Filtering only the forecasts let a
+    # report dated the day before kick-off settle the match anyway, as soon as
+    # the caller handed it the future result — a bet won in a report written
+    # while it was still unplayed.
+    cut = as_of.date() if as_of is not None else None
     index = {
-        _key(m.competition or "", m.home, m.away, m.date): m for m in results
+        _key(m.competition or "", m.home, m.away, m.date): m
+        for m in results
+        if cut is None or m.date <= cut
     }
     prices = closing or ClosingPrices()
 
@@ -455,23 +497,28 @@ def measure(
     pending: list[Forecast] = []
     for forecast in latest.values():
         match = _find(index, forecast)
+        kickoff = forecast.kickoff_instant
+        if as_of is not None and kickoff is not None and kickoff > as_of:
+            pending.append(forecast)  # not played yet, at the report's date
+            continue
         if match is None or match.score is None:
             pending.append(forecast)
             continue
-        quoted = closing_key(
-            forecast.competition,
-            forecast.home,
-            forecast.away,
-            match.date,
-            forecast.market_key,
+        found = prices.lookup(
+            competition=forecast.competition,
+            home=forecast.home,
+            away=forecast.away,
+            date=match.date,
+            market=forecast.market_key,
+            bookmaker=forecast.bookmaker,
         )
         resolved.append(
             ResolvedForecast(
                 forecast=forecast,
                 score=match.score,
                 score_date=match.date,
-                closing=prices.get(quoted),
-                closing_book=prices.source if prices.get(quoted) else "",
+                closing=found[0] if found else None,
+                closing_book=found[1] if found else "",
             )
         )
     resolved, duplicates = _one_per_fixture(resolved)
@@ -568,15 +615,26 @@ def _base_rate(outcomes: Sequence[Outcome]) -> OutcomeProbabilities:
 
 
 def closing_key(
-    competition: str, home: str, away: str, date: dt.date, market: str
+    competition: str,
+    home: str,
+    away: str,
+    date: dt.date,
+    market: str,
+    bookmaker: str = "",
 ) -> str:
-    """Identity of one **priced market on one fixture**.
+    """Identity of one **priced market, at one bookmaker, on one fixture**.
 
-    A closing price belongs to a match *and* a market *and* a line — comparing
-    the price taken on ``OU:2.5:over`` with the closing price of ``1X2:H`` would
-    produce a number that means nothing at all.
+    A closing price belongs to a match *and* a market *and* a line *and* the book
+    that quoted it. Leaving the bookmaker out made two closes collide: a Betclic
+    close at 1.90 was overwritten by another book's 2.80, and the comparison then
+    measured the gap between two different companies rather than the movement of
+    the price actually taken.
+
+    An empty bookmaker is its own identity — the **market reference**, meaning
+    "some book's close", which is a weaker comparison and is labelled as such.
     """
-    return f"{_key(competition, home, away, date)}#{market.strip().upper()}"
+    book = normalise(bookmaker) if bookmaker else "*"
+    return f"{_key(competition, home, away, date)}#{market.strip().upper()}@{book}"
 
 
 def _key(competition: str, home: str, away: str, date: dt.date) -> str:
@@ -608,3 +666,40 @@ def _find(index: Mapping[str, Match], forecast: Forecast) -> Match | None:
         and key.startswith(f"{forecast.competition}|")
     ]
     return hits[0] if len(hits) == 1 else None
+
+
+def measure_journal(
+    book: ForecastBook,
+    *,
+    results_for: Callable[[str], Sequence[Match]],
+    closing: ClosingPrices | None = None,
+    as_of: dt.datetime | None = None,
+    include_retrospective: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> Measurement:
+    """Collect what a journal needs, then measure it.
+
+    ``results_for`` is handed one competition key at a time and returns the
+    matches that source knows. Keeping collection behind a callable is what lets
+    the same function serve the terminal and the phone's **Bilan** button: the
+    one that takes minutes reports its progress, the one that does not, does not.
+    """
+    forecasts = list(book)
+    competitions = sorted({f.competition for f in forecasts if f.competition})
+    played: list[Match] = []
+    for index, competition in enumerate(competitions, start=1):
+        if progress is not None:
+            progress(f"résultats {index}/{len(competitions)} — {competition}")
+        played.extend(results_for(competition))
+    earliest = min((f.as_of.date() for f in forecasts), default=None)
+    prior = [m for m in played if earliest is not None and m.date < earliest]
+    if progress is not None:
+        progress(f"mesure de {len(forecasts)} prévision(s)")
+    return measure(
+        book,
+        results=played,
+        prior=prior,
+        closing=closing,
+        as_of=as_of,
+        include_retrospective=include_retrospective,
+    )

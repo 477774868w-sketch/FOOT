@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from foot.analysis.naming import normalise
@@ -48,6 +48,9 @@ __all__ = [
     "parse_lineups",
     "parse_matches",
 ]
+
+Fetcher = Callable[..., tuple[object, dt.datetime]]
+"""How the adapter reaches the network. Replaceable, so tests exercise the rest."""
 
 CREDENTIAL = "FOOTBALL_DATA_ORG_TOKEN"
 """Environment variable holding the API token. Never hard-code a key."""
@@ -250,7 +253,7 @@ def _role(position: str) -> str:
 class FootballDataOrgProvider:
     """Season data from football-data.org, for an account that has a token."""
 
-    __slots__ = ("_cache", "_timeout", "_token")
+    __slots__ = ("_cache", "_fetch", "_now", "_timeout", "_token")
 
     def __init__(
         self,
@@ -258,10 +261,21 @@ class FootballDataOrgProvider:
         *,
         token: str | None = None,
         timeout: float = 20.0,
+        now: Callable[[], dt.datetime] | None = None,
+        fetch: Fetcher | None = None,
     ) -> None:
         self._cache = cache
         self._token = token if token is not None else os.environ.get(CREDENTIAL, "")
         self._timeout = timeout
+        # Injected for the same reason the watch injects its own: a cache whose
+        # expiry can only be exercised by waiting fifteen minutes is a cache
+        # nobody tests, and the freshness rule it enforces is the difference
+        # between a T−60 check and a re-print of T−75.
+        self._now = now or utcnow
+        # Injected so an integration test can drive the **real** adapter — its
+        # cache, its parsing, its role mapping — against recorded responses. A
+        # stub adapter would prove nothing about the code that actually runs.
+        self._fetch = fetch or fetch_json
 
     @property
     def name(self) -> str:
@@ -308,10 +322,10 @@ class FootballDataOrgProvider:
     def _get(self, path: str) -> tuple[object, dt.datetime]:
         url = f"{_BASE}{path}"
         if self._cache is not None:
-            cached = self._cache.load(url)
+            cached = self._cache.load(url, now=self._now())
             if cached is not None:
                 return (cached.payload, cached.retrieved_at)
-        payload, retrieved = fetch_json(
+        payload, retrieved = self._fetch(
             url, timeout=self._timeout, headers=self._headers()
         )
         if self._cache is not None:

@@ -25,12 +25,13 @@ bookmaker** : comparer le prix pris sur « plus de 2,5 buts » à la clôture du
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from foot.analysis.measure import ClosingPrices, ClosingState, closing_key
 from foot.analysis.quotes import offer_for_key
-from foot.collect.base import CollectionError, OddsSource
+from foot.collect.base import ClosingSource, CollectionError
+from foot.collect.footballdata import DIVISION_FOR_KEY
 from foot.data.csv_source import parse_date
 from foot.domain import Outcome
 
@@ -60,20 +61,25 @@ def load_closing_csv(
             detail=f"fichier de clôtures introuvable : {file}",
         )
     prices: dict[str, float] = {}
+    candidates: dict[str, set[float]] = {}
     refused = 0
     try:
         with file.open(newline="", encoding="utf-8-sig") as handle:
             for row in csv.DictReader(handle):
-                entry = _row_to_price(row, competition=competition)
+                entry = _row_to_price(
+                    row, competition=competition, bookmaker=bookmaker
+                )
                 if entry is None:
                     refused += 1
                     continue
-                key, price = entry
+                key, reference, price = entry
                 prices[key] = price
+                candidates.setdefault(reference, set()).add(price)
     except (OSError, csv.Error) as error:
         return ClosingPrices(
             state=ClosingState.UNREACHABLE, source=str(file), detail=str(error)
         )
+    prices.update(_unambiguous(candidates))
     detail = f"{refused} ligne(s) illisible(s)" if refused else ""
     return ClosingPrices(
         state=ClosingState.SERVED,
@@ -84,8 +90,8 @@ def load_closing_csv(
 
 
 def _row_to_price(
-    row: dict[str, str], *, competition: str
-) -> tuple[str, float] | None:
+    row: dict[str, str], *, competition: str, bookmaker: str = ""
+) -> tuple[str, str, float] | None:
     """One CSV row into a keyed price, or nothing when it cannot be trusted.
 
     A market whose key the engine cannot rebuild is refused rather than stored:
@@ -104,14 +110,17 @@ def _row_to_price(
     offer = offer_for_key(market)
     if offer is None:
         return None
-    key = closing_key(
-        (row.get("competition") or competition).strip(), home, away, date, offer.key
+    where = (row.get("competition") or competition).strip()
+    book = (row.get("bookmaker") or bookmaker).strip()
+    return (
+        closing_key(where, home, away, date, offer.key, book),
+        closing_key(where, home, away, date, offer.key),
+        price,
     )
-    return (key, price)
 
 
 def load_closing_from_sources(
-    sources: Iterable[OddsSource],
+    sources: Iterable[ClosingSource],
     *,
     competitions: Sequence[str],
     seasons: Sequence[str],
@@ -126,30 +135,48 @@ def load_closing_from_sources(
     if not listed:
         return ClosingPrices(state=ClosingState.NOT_WIRED)
     prices: dict[str, float] = {}
+    candidates: dict[str, set[float]] = {}
     names: list[str] = []
     failures: list[str] = []
+    wanted = [c for c in competitions if c] or [""]
     for source in listed:
-        try:
-            book, _evidence = source.odds()
-        except (CollectionError, OSError) as error:
-            failures.append(f"{source.name} : {error}")
-            continue
-        names.append(source.name)
-        for fixture, quote in book.items():
-            for outcome, market in _MARKET_BY_OUTCOME.items():
-                price = _price_for(quote, outcome)
-                if price is None:
-                    continue
-                prices[
-                    closing_key(
+        served = False
+        for competition, season in _requests(source, wanted, seasons):
+            try:
+                # Actually asked for. Calling odds() bare let the archive answer
+                # with its own defaults — E0 / 2024-25 — so a request for Serie A
+                # 2026-27 came back with English prices from two seasons earlier.
+                book, _evidence = source.odds(competition, season)
+            except (CollectionError, OSError, KeyError, ValueError) as error:
+                failures.append(f"{source.name} {competition} {season} : {error}")
+                continue
+            served = True
+            for fixture, quote in book.items():
+                for outcome, market in _MARKET_BY_OUTCOME.items():
+                    price = _price_for(quote, outcome)
+                    if price is None:
+                        continue
+                    prices[
+                        closing_key(
+                            fixture.competition or "",
+                            fixture.home,
+                            fixture.away,
+                            fixture.date,
+                            market,
+                            getattr(quote, "bookmaker", "") or "",
+                        )
+                    ] = price
+                    reference = closing_key(
                         fixture.competition or "",
                         fixture.home,
                         fixture.away,
                         fixture.date,
                         market,
                     )
-                ] = price
-    del competitions, seasons  # sources serve whole archives; no filtering needed
+                    candidates.setdefault(reference, set()).add(price)
+        if served:
+            names.append(source.name)
+    prices.update(_unambiguous(candidates))
     if not names:
         return ClosingPrices(
             state=ClosingState.UNREACHABLE,
@@ -176,3 +203,39 @@ def _price_for(quote: object, outcome: Outcome) -> float | None:
     if isinstance(value, (int, float)) and value > 1.0:
         return float(value)
     return None
+
+
+def _requests(
+    source: ClosingSource, competitions: Sequence[str], seasons: Sequence[str]
+) -> list[tuple[str, str]]:
+    """Which (competition, season) pairs to ask this source for.
+
+    Our keys are translated into the source's own division codes where a mapping
+    exists; a competition the source does not serve is not requested at all,
+    rather than silently answered with its default division.
+    """
+    served = set(source.competitions()) if hasattr(source, "competitions") else set()
+    pairs: list[tuple[str, str]] = []
+    for competition in competitions:
+        code = DIVISION_FOR_KEY.get(competition, competition)
+        if served and code not in served:
+            continue
+        for season in seasons or ("",):
+            pairs.append((code, season))
+    return pairs
+
+
+def _unambiguous(candidates: Mapping[str, set[float]]) -> dict[str, float]:
+    """Market-reference prices, kept only where the books agree.
+
+    A forecast that recorded no bookmaker can still be compared to "the market's
+    close" — but only when there is one. Two books closing the same market at
+    1.90 and 2.80 do not average into a reference; keeping either would silently
+    pick a winner, so the entry is dropped and the comparison reported as
+    unavailable.
+    """
+    return {
+        key: next(iter(values))
+        for key, values in candidates.items()
+        if len(values) == 1
+    }

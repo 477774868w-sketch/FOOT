@@ -353,12 +353,49 @@ def test_g5b_a_report_cut_off_excludes_anything_written_after_it() -> None:
     )
     book = _book(early, later)
     results = [_played("Club A", "Club B", (1, 0), day=21)]
-    full = measure(book, results=results)
-    assert [r.forecast.fingerprint for r in full.resolved] == ["mardi"]
-    stopped = measure(
+
+    after_the_match = measure(
+        book, results=results, as_of=dt.datetime(2026, 9, 22, 9, tzinfo=UTC)
+    )
+    assert [r.forecast.fingerprint for r in after_the_match.resolved] == ["mardi"]
+
+    # Same journal, report dated before the second line was written: it is
+    # excluded, and the match — not yet played at that instant — stays pending.
+    before_it_was_written = measure(
         book, results=results, as_of=dt.datetime(2026, 9, 20, 18, tzinfo=UTC)
     )
-    assert [r.forecast.fingerprint for r in stopped.resolved] == ["lundi"]
+    assert not before_it_was_written.resolved
+    assert [f.fingerprint for f in before_it_was_written.pending] == ["lundi"]
+    assert [f.fingerprint for f in before_it_was_written.excluded] == ["mardi"]
+
+
+def test_g5d_a_match_not_yet_played_at_the_report_date_stays_pending() -> None:
+    """Un résultat futur ne doit pas entrer dans un bilan daté d'avant le match."""
+    kickoff = dt.datetime(2026, 9, 21, 20, 45, tzinfo=UTC)
+    forecast = dataclasses.replace(
+        _forecast(
+            "Club A", "Club B", date="2026-09-21", market_key="1X2:H", odds=2.0
+        ),
+        as_of=dt.datetime(2026, 9, 20, 9, tzinfo=UTC),
+        recorded_at=dt.datetime(2026, 9, 20, 9, tzinfo=UTC),
+        kickoff_at=kickoff.isoformat(),
+    )
+    book = _book(forecast)
+    results = [_played("Club A", "Club B", (2, 0), day=21)]
+
+    the_day_before = measure(
+        book, results=results, as_of=dt.datetime(2026, 9, 20, 18, tzinfo=UTC)
+    )
+    assert not the_day_before.resolved, (
+        "le pari serait gagné dans un rapport écrit alors qu'il n'est pas joué"
+    )
+    assert len(the_day_before.pending) == 1
+
+    afterwards = measure(
+        book, results=results, as_of=dt.datetime(2026, 9, 22, 18, tzinfo=UTC)
+    )
+    assert len(afterwards.resolved) == 1
+    assert afterwards.resolved[0].profit() == 1.0
 
 
 def test_g5c_the_latest_forecast_is_chosen_by_time_not_by_file_order() -> None:
@@ -490,13 +527,20 @@ def test_g9_the_command_actually_attempts_to_collect_closing_prices() -> None:
         )
         prices = load_closing_csv(path, bookmaker="Pinnacle")
         assert prices.state is ClosingState.SERVED
-        assert len(prices.prices) == 2, "la ligne illisible est refusée, pas devinée"
+        # Two markets, each stored twice: once under the bookmaker that quoted
+        # it, once as the market reference — which exists only because a single
+        # book quoted it. The unreadable line is refused, never guessed.
+        assert len(prices.prices) == 4, prices.prices
         assert "1 ligne(s) illisible(s)" in prices.detail
 
-        key = closing_key(_COMP, "Club A", "Club B", dt.date(2026, 9, 14), "1X2:H")
+        key = closing_key(
+            _COMP, "Club A", "Club B", dt.date(2026, 9, 14), "1X2:H", "Pinnacle"
+        )
         assert prices.get(key) is None, "la compétition compte dans l'identité"
-        untagged = closing_key("", "Club A", "Club B", dt.date(2026, 9, 14), "1X2:H")
-        assert prices.get(untagged) == 2.00
+        untagged = closing_key(
+            "", "Club A", "Club B", dt.date(2026, 9, 14), "1X2:H", "Pinnacle"
+        )
+        assert prices.get(untagged) == 2.00, "le bookmaker aussi"
 
 
 def test_g9b_a_closing_price_belongs_to_a_market_not_only_to_a_match() -> None:

@@ -31,7 +31,7 @@ from foot.analysis.ledgerbook import ForecastBook, record_run
 from foot.analysis.request import DEFAULT_TIMEZONE
 from foot.analysis.watch import WatchPlan, WatchReport, watch_until_kickoff
 
-__all__ = ["Supervisor", "WatchHandle"]
+__all__ = ["LedgerJob", "Supervisor", "WatchHandle"]
 
 
 @dataclass
@@ -72,6 +72,28 @@ class WatchHandle:
         )
 
 
+@dataclass
+class LedgerJob:
+    """One server-side measurement, and how far along it is.
+
+    Measuring means fetching results for every competition in the journal, which
+    takes seconds to minutes. A phone cannot hold a request open for that, so the
+    work happens here and the page reads the state — « en cours », « terminé »,
+    or the reason it failed.
+    """
+
+    started_at: dt.datetime
+    progress: str = "démarré"
+    report: str = ""
+    finished: bool = False
+    error: str = ""
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def snapshot(self) -> tuple[bool, str, str, str]:
+        with self.lock:
+            return (self.finished, self.progress, self.report, self.error)
+
+
 class Supervisor:
     """Holds the running watches for one server process.
 
@@ -81,13 +103,33 @@ class Supervisor:
     narrow and true — a watch outlives the request and the browser tab.
     """
 
-    __slots__ = ("_book", "_engine", "_handles", "_lock", "_threads")
+    __slots__ = (
+        "_book",
+        "_engine",
+        "_handles",
+        "_ledger_job",
+        "_lock",
+        "_threads",
+        "_watch_engine",
+    )
 
-    def __init__(self, engine: Engine, *, book: ForecastBook | None = None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        book: ForecastBook | None = None,
+        watch_engine: Engine | None = None,
+    ) -> None:
         self._engine = engine
+        # Watches read team sheets minutes apart; the day-to-day engine reads
+        # them through a six-hour cache. Handing the watch that engine meant the
+        # T−60 check replayed T−75's answer — the exact defect the CLI already
+        # avoided, reintroduced by the button. One policy, both paths.
+        self._watch_engine = watch_engine or engine
         self._book = book
         self._handles: dict[str, WatchHandle] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._ledger_job: LedgerJob | None = None
         self._lock = threading.Lock()
 
     def start(
@@ -124,7 +166,7 @@ class Supervisor:
         """The watch itself, on its own thread."""
         try:
             report = watch_until_kickoff(
-                self._engine,
+                self._watch_engine,
                 matches=handle.matches,
                 plan=WatchPlan(kickoff=handle.kickoff, timezone=handle.timezone),
                 bookmaker=handle.bookmaker or None,
@@ -179,3 +221,42 @@ class Supervisor:
         lines = [f"{len(running)} suivi(s) côté serveur :"]
         lines.extend(handle.summary() for handle in running)
         return "\n".join(lines)
+
+    # -- Bilan -------------------------------------------------------------
+    def ledger_job(self) -> LedgerJob | None:
+        """The current or last measurement, if one was ever asked for."""
+        with self._lock:
+            return self._ledger_job
+
+    def measure_async(
+        self, work: Callable[[LedgerJob], str], *, force: bool = False
+    ) -> LedgerJob:
+        """Run one measurement in the background, unless one is already running.
+
+        ``work`` receives the job so it can publish progress as it goes, and
+        returns the finished report. Keeping the collection outside this class is
+        deliberate: the supervisor knows about threads and state, not about which
+        provider serves which competition.
+        """
+        with self._lock:
+            running = self._ledger_job
+            if running is not None and not running.finished and not force:
+                return running
+            job = LedgerJob(started_at=dt.datetime.now(dt.timezone.utc))
+            self._ledger_job = job
+
+        def run() -> None:
+            try:
+                report = work(job)
+            except Exception as error:  # a failed measurement says so
+                with job.lock:
+                    job.error = f"{type(error).__name__}: {error}"
+                    job.finished = True
+                return
+            with job.lock:
+                job.report = report
+                job.progress = "terminé"
+                job.finished = True
+
+        threading.Thread(target=run, name="bilan", daemon=True).start()
+        return job
