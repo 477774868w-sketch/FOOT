@@ -12,12 +12,14 @@ from foot.collect.base import (
     Provider,
     ProviderBlockedError,
     ProviderStatus,
+    QuotaReport,
     Reachability,
     ResultSet,
+    redact_url,
 )
 from foot.collect.cache import Cache, CacheEntry
 from foot.collect.footballdata import DIVISIONS, FootballDataProvider
-from foot.collect.http import Response, fetch, fetch_json
+from foot.collect.http import Response, fetch, fetch_json, fetch_json_headers
 from foot.collect.manual import ManualProvider, odds_from_pairs, parse_odds_line
 from foot.collect.openfootball import (
     COMPETITIONS,
@@ -40,6 +42,7 @@ __all__ = [
     "Provider",
     "ProviderBlockedError",
     "ProviderStatus",
+    "QuotaReport",
     "Reachability",
     "Registry",
     "RegistryReport",
@@ -48,7 +51,9 @@ __all__ = [
     "SeasonData",
     "fetch",
     "fetch_json",
+    "fetch_json_headers",
     "odds_from_pairs",
     "parse_odds_line",
+    "redact_url",
     "resolve_competition",
 ]

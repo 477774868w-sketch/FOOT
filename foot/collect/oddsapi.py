@@ -28,9 +28,10 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 import urllib.parse
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from foot.analysis.naming import normalise
@@ -39,10 +40,11 @@ from foot.collect.base import (
     CollectionError,
     ProviderBlockedError,
     ProviderStatus,
+    QuotaReport,
     Reachability,
 )
 from foot.collect.cache import Cache
-from foot.collect.http import fetch_json
+from foot.collect.http import fetch_json, fetch_json_headers
 from foot.domain import Fixture
 from foot.provenance import Confidence, Evidence, Source, utcnow
 
@@ -234,21 +236,56 @@ def best_prices(
     deliberate: a price they cannot actually take is not an opportunity. When
     their book is silent, the best available price is offered **and labelled**
     with whoever gave it.
+
+    ``prefer`` names that book **for this call** and is authoritative. It used to
+    only switch the rule on, while *which* book counted came from whatever was
+    passed at parse time — so a bookmaker chosen in a form enabled the
+    preference and then lost to the highest price anyway.
     """
+    wanted = normalise(prefer) if prefer else ""
     chosen: dict[str, QuotedPrice] = {}
     for quote in quotes:
-        current = chosen.get(quote.market_key)
+        marked = (
+            replace(quote, requested_bookmaker=prefer)
+            if prefer and quote.requested_bookmaker != prefer
+            else quote
+        )
+        current = chosen.get(marked.market_key)
         if current is None:
-            chosen[quote.market_key] = quote
+            chosen[marked.market_key] = marked
             continue
-        if prefer:
-            mine, theirs = quote.from_requested_book, current.from_requested_book
+        if wanted:
+            mine = normalise(marked.bookmaker) == wanted
+            theirs = normalise(current.bookmaker) == wanted
             if mine != theirs:
-                chosen[quote.market_key] = quote if mine else current
+                chosen[marked.market_key] = marked if mine else current
                 continue
-        if quote.price > current.price:
-            chosen[quote.market_key] = quote
+        if marked.price > current.price:
+            chosen[marked.market_key] = marked
     return chosen
+
+
+def _as_int(value: object) -> int | None:
+    """Read a counter the service sent, or nothing — never a guessed zero."""
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _as_text(value: object) -> str:
+    text = str(value or "").strip()
+    return f"dernière requête comptée : {text}" if text else ""
+
+
+def _hide_key(message: str, key: str) -> str:
+    """Never let the key ride back out inside an error message.
+
+    The URL carries ``apiKey=…`` in the clear, and urllib puts the URL in the
+    exception it raises. A control screen exists to be read aloud and pasted
+    into a message; it must not be a way to hand over the key it is checking.
+    """
+    cleaned = message.replace(key, "[clé masquée]") if key else message
+    return re.sub(r"(?i)(apikey=)[^&\s'\"]+", r"\1[masquée]", cleaned)
 
 
 class OddsApiProvider:
@@ -343,6 +380,56 @@ class OddsApiProvider:
             retrieved,
         )
 
+    def quota(self) -> QuotaReport:
+        """Read the remaining credit this key has, from the service's headers.
+
+        The Odds API publishes the allowance nowhere but in the response
+        headers, and its ``/sports`` listing is the one call that does **not**
+        cost a credit — so asking how much is left costs nothing. On the free
+        plan this is the number that decides how many evenings are left, which
+        is precisely why it is measured rather than assumed.
+        """
+        if not self.configured:
+            return QuotaReport(
+                provider=self.name,
+                detail=f"aucune clé dans {CREDENTIAL} : rien n'a été demandé",
+                reachability=Reachability.AUTH_REQUIRED,
+            )
+        query = urllib.parse.urlencode({"apiKey": self._key})
+        url = f"{_BASE}/sports?{query}"
+        try:
+            _payload, retrieved, headers = fetch_json_headers(url, timeout=self._timeout)
+        except ProviderBlockedError as error:
+            return QuotaReport(
+                provider=self.name,
+                detail=_hide_key(str(error), self._key),
+                reachability=Reachability.BLOCKED,
+            )
+        except CollectionError as error:
+            return QuotaReport(
+                provider=self.name,
+                detail=_hide_key(str(error), self._key),
+                reachability=Reachability.ERROR,
+            )
+        remaining = _as_int(headers.get("x-requests-remaining"))
+        used = _as_int(headers.get("x-requests-used"))
+        if remaining is None and used is None:
+            return QuotaReport(
+                provider=self.name,
+                detail="le service n'a pas renvoyé d'en-tête de quota",
+                reachability=Reachability.OK,
+                checked_at=retrieved,
+            )
+        return QuotaReport(
+            provider=self.name,
+            used=used,
+            remaining=remaining,
+            limit=used + remaining if used is not None and remaining is not None else None,
+            detail=_as_text(headers.get("x-requests-last")),
+            reachability=Reachability.OK,
+            checked_at=retrieved,
+        )
+
     def probe(self, competition: str = "en.1") -> ProviderStatus:
         """Ask the service what this key actually returns, right now."""
         now = utcnow()
@@ -388,12 +475,16 @@ class OddsApiProvider:
 
     # -- MarketSource ------------------------------------------------------
     def market_prices(
-        self, fixture: Fixture
+        self, fixture: Fixture, *, prefer: str = ""
     ) -> dict[str, tuple[float, dt.datetime | None, str]]:
         """Every market this API quotes for one fixture, priced and dated.
 
         Satisfies :class:`~foot.collect.base.MarketSource`, so the engine can
         consult it after sealing the dossier without knowing this class exists.
+        ``prefer`` names the operator's own bookmaker for this run and wins over
+        the one given at construction — a server builds its engine once, so a
+        bookmaker typed in a form would otherwise never reach this method.
+
         A fixture the API does not cover returns nothing — reported as "no price
         available", never as a missing market.
 
@@ -415,7 +506,9 @@ class OddsApiProvider:
         matching = _quotes_for(quotes, fixture)
         return {
             key: (quote.price, quote.quoted_at, quote.label)
-            for key, quote in best_prices(matching, prefer=self._bookmaker).items()
+            for key, quote in best_prices(
+                matching, prefer=prefer or self._bookmaker
+            ).items()
         }
 
 

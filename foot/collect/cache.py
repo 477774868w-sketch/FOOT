@@ -14,6 +14,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from foot.collect.base import redact_url
 from foot.provenance import utcnow
 
 __all__ = ["Cache", "CacheEntry"]
@@ -96,6 +97,12 @@ class Cache:
         return entry
 
     def store(self, url: str, payload: object, retrieved_at: dt.datetime) -> CacheEntry:
+        """Store one payload. The URL is written back **without its key**.
+
+        The lookup key is a hash of the full URL, so nothing is lost by keeping
+        the readable copy redacted — and a cache directory that lives on a
+        server's disk, or in a backup of it, never carries an API key.
+        """
         key = self.key_for(url)
         self._directory.mkdir(parents=True, exist_ok=True)
         entry = CacheEntry(key=key, payload=payload, retrieved_at=retrieved_at, url=url)
@@ -103,7 +110,7 @@ class Cache:
             json.dumps(
                 {
                     "key": key,
-                    "url": url,
+                    "url": redact_url(url),
                     "retrieved_at": retrieved_at.isoformat(),
                     "payload": payload,
                 },

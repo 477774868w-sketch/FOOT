@@ -12,6 +12,7 @@ network call and never see a URL.
 from __future__ import annotations
 
 import datetime as dt
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -33,11 +34,13 @@ __all__ = [
     "Provider",
     "ProviderBlockedError",
     "ProviderStatus",
+    "QuotaReport",
     "Reachability",
     "ResultSet",
     "SeasonData",
     "SeasonSource",
     "XgSource",
+    "redact_url",
 ]
 
 
@@ -80,6 +83,24 @@ class ProviderBlockedError(CollectionError):
     """
 
 
+_SECRET_PARAMS = ("apikey", "api_key", "api-key", "key", "token", "auth", "apitoken")
+_SECRET_QUERY = re.compile(
+    r"(?i)([?&](?:" + "|".join(_SECRET_PARAMS) + r")=)[^&\s]*"
+)
+
+
+def redact_url(url: str) -> str:
+    """Return ``url`` with any credential-bearing query value removed.
+
+    A key travelling in a query string ends up in three places nobody thinks
+    about: the text of the exception urllib raises, the cache file written next
+    to the payload, and whatever a report prints from either. One function, used
+    at both of those boundaries, is the only way that stays true as providers are
+    added.
+    """
+    return _SECRET_QUERY.sub(r"\1[masquée]", url)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderStatus:
     """What one provider can actually do, as measured."""
@@ -116,6 +137,50 @@ class ProviderStatus:
         if self.coverage:
             line += f"\n{'':<22} couverture vérifiée : {', '.join(self.coverage)}"
         return line
+
+
+@dataclass(frozen=True, slots=True)
+class QuotaReport:
+    """What a service says about **this** account's plan and remaining credit.
+
+    Read from the service, never from a price list: the operator needs to know
+    what tonight's analyses will actually cost him in credits, and a
+    documentation page cannot answer that. A service that publishes nothing
+    usable leaves the numbers unset and says so in ``detail`` — an unknown quota
+    is reported as unknown, never estimated.
+    """
+
+    provider: str
+    plan: str = ""
+    used: int | None = None
+    remaining: int | None = None
+    limit: int | None = None
+    detail: str = ""
+    reachability: Reachability = Reachability.NOT_PROBED
+    """How the request itself went — so « clé refusée » and « réseau fermé »
+    stay two different answers rather than one empty figure."""
+
+    checked_at: dt.datetime = field(default_factory=utcnow)
+
+    @property
+    def measured(self) -> bool:
+        """Whether the service returned a figure, as opposed to a message."""
+        return self.remaining is not None or self.used is not None
+
+    def render(self) -> str:
+        parts: list[str] = [self.provider]
+        if self.plan:
+            parts.append(f"formule « {self.plan} »")
+        if self.used is not None and self.limit is not None:
+            left = self.limit - self.used if self.remaining is None else self.remaining
+            parts.append(f"{self.used}/{self.limit} requêtes utilisées ({left} restantes)")
+        elif self.remaining is not None:
+            parts.append(f"{self.remaining} requête(s) restante(s)")
+        elif self.used is not None:
+            parts.append(f"{self.used} requête(s) utilisée(s)")
+        if self.detail:
+            parts.append(self.detail)
+        return " · ".join(parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,9 +320,15 @@ class MarketSource(Protocol):
         """Identifier used in reports."""
 
     def market_prices(
-        self, fixture: Fixture
+        self, fixture: Fixture, *, prefer: str = ""
     ) -> Mapping[str, tuple[float, dt.datetime | None, str]]:
-        """``{clé de marché: (cote, heure de relevé, bookmaker)}`` for one fixture."""
+        """``{clé de marché: (cote, heure de relevé, bookmaker)}`` for one fixture.
+
+        ``prefer`` is the bookmaker the operator actually plays at, named for
+        **this run**. It cannot be fixed when the source is constructed: a server
+        builds its engine once and then serves many operators, so a bookmaker
+        chosen in a form would never reach the source that picks the price.
+        """
 
 
 @runtime_checkable

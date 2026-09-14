@@ -40,6 +40,7 @@ from foot.collect.base import (
     CollectionError,
     ProviderBlockedError,
     ProviderStatus,
+    QuotaReport,
     Reachability,
 )
 from foot.collect.cache import Cache
@@ -892,6 +893,84 @@ class ApiFootballProvider:
             coverage=(competition,),
         )
 
+    def quota(self) -> QuotaReport:
+        """Ask the account endpoint what plan this key holds, and what is left.
+
+        API-Football publishes the day's consumption on ``/status``, which is
+        itself free. The figures printed on a control screen therefore come from
+        the service, not from the plan the operator believes he bought: an
+        expired subscription and a live one are told apart here, before an
+        evening's analyses depend on it.
+        """
+        if not self.configured:
+            return QuotaReport(
+                provider=self.name,
+                detail=f"aucune clé dans {CREDENTIAL} : rien n'a été demandé",
+                reachability=Reachability.AUTH_REQUIRED,
+                checked_at=self._now(),
+            )
+        try:
+            payload, retrieved = self._get("/status")
+        except ProviderBlockedError as error:
+            return QuotaReport(
+                provider=self.name,
+                detail=str(error),
+                reachability=Reachability.BLOCKED,
+                checked_at=self._now(),
+            )
+        except CollectionError as error:
+            return QuotaReport(
+                provider=self.name,
+                detail=str(error),
+                reachability=Reachability.ERROR,
+                checked_at=self._now(),
+            )
+        body = payload.get("response") if isinstance(payload, Mapping) else None
+        if not isinstance(body, Mapping):
+            # The request went through and the service did not refuse the key —
+            # it would have answered with an « errors » block, which `_get`
+            # turns into a refusal. So: reached and authenticated, counter
+            # unreadable. Calling that « injoignable » would send the operator
+            # looking for a network problem he does not have.
+            return QuotaReport(
+                provider=self.name,
+                detail="clé acceptée ; aucun compteur exploitable dans la réponse",
+                reachability=Reachability.OK,
+                checked_at=retrieved,
+            )
+        subscription = body.get("subscription")
+        plan = ""
+        note = ""
+        if isinstance(subscription, Mapping):
+            plan = str(subscription.get("plan") or "")
+            active = subscription.get("active")
+            end = subscription.get("end")
+            if active is False:
+                note = "abonnement inactif d'après le service"
+            elif end:
+                note = f"jusqu'au {end}"
+        requests = body.get("requests")
+        used = limit = None
+        if isinstance(requests, Mapping):
+            used = _as_int(requests.get("current"))
+            limit = _as_int(requests.get("limit_day"))
+        if used is None and limit is None and not note:
+            note = "le service n'a pas renvoyé de compteur de requêtes"
+        return QuotaReport(
+            provider=self.name,
+            plan=plan,
+            used=used,
+            limit=limit,
+            detail=note,
+            reachability=(
+                Reachability.BLOCKED
+                if isinstance(subscription, Mapping)
+                and subscription.get("active") is False
+                else Reachability.OK
+            ),
+            checked_at=retrieved,
+        )
+
     def coverage(
         self, competitions: Sequence[str], seasons: Sequence[str]
     ) -> CoverageMatrix:
@@ -1079,6 +1158,17 @@ def _first_fixture_id(payload: object) -> int | None:
         identifier = _nested(block, "fixture", "id")
         if isinstance(identifier, int):
             return identifier
+    return None
+
+
+def _as_int(value: object) -> int | None:
+    """Read a counter the service sent, or nothing — never a guessed zero."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
     return None
 
 

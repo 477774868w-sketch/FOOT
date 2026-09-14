@@ -14,12 +14,13 @@ import json
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
-from foot.collect.base import CollectionError, ProviderBlockedError
+from foot.collect.base import CollectionError, ProviderBlockedError, redact_url
 from foot.provenance import utcnow
 
-__all__ = ["Response", "fetch", "fetch_json"]
+__all__ = ["Response", "fetch", "fetch_json", "fetch_json_headers"]
 
 _USER_AGENT = "foot/2.0 (+https://github.com/openfootball; analyse football)"
 _BLOCKED_MARKERS = (
@@ -37,6 +38,15 @@ class Response:
     body: bytes
     retrieved_at: dt.datetime
 
+    headers: Mapping[str, str] = field(default_factory=dict)
+    """Response headers, keyed in lower case.
+
+    Kept because both paid services publish their **remaining quota** here and
+    nowhere else. A quota read from a header is a measurement; a quota copied
+    from a pricing page is a claim, and this project does not print claims as
+    if they were measurements.
+    """
+
     def text(self, encoding: str = "utf-8") -> str:
         return self.body.decode(encoding, errors="replace")
 
@@ -45,7 +55,12 @@ class Response:
 
 
 def _classify(error: Exception, url: str) -> CollectionError:
-    """Turn a transport failure into the most specific error we can justify."""
+    """Turn a transport failure into the most specific error we can justify.
+
+    The URL is redacted first: several services authenticate by query string,
+    and the message built here is shown to the operator and written to logs.
+    """
+    url = redact_url(url)
     message = str(error).lower()
     if isinstance(error, urllib.error.HTTPError):
         if error.code in (401, 403):
@@ -96,6 +111,10 @@ def fetch(
                     status=int(handle.status),
                     body=handle.read(),
                     retrieved_at=utcnow(),
+                    headers={
+                        str(name).lower(): str(value)
+                        for name, value in handle.headers.items()
+                    },
                 )
         except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
             last = _classify(error, url)
@@ -103,13 +122,31 @@ def fetch(
                 raise last from error
             if attempt < retries - 1:
                 sleep(backoff**attempt)  # type: ignore[operator]
-    raise last if last is not None else CollectionError(f"{url} : échec inconnu")
+    raise last if last is not None else CollectionError(
+        f"{redact_url(url)} : échec inconnu"
+    )
 
 
 def fetch_json(url: str, **kwargs: object) -> tuple[object, dt.datetime]:
     """Fetch and decode JSON, returning the payload and its retrieval time."""
+    payload, retrieved, _headers = fetch_json_headers(url, **kwargs)
+    return (payload, retrieved)
+
+
+def fetch_json_headers(
+    url: str, **kwargs: object
+) -> tuple[object, dt.datetime, Mapping[str, str]]:
+    """Like :func:`fetch_json`, but keeps the response headers as well.
+
+    A separate function rather than a wider return from :func:`fetch_json`: the
+    providers accept an injected fetcher with that exact shape, and widening it
+    would break every recorded-response test double for the sake of two quota
+    probes.
+    """
     response = fetch(url, **kwargs)  # type: ignore[arg-type]
     try:
-        return response.json(), response.retrieved_at
+        return (response.json(), response.retrieved_at, response.headers)
     except json.JSONDecodeError as error:
-        raise CollectionError(f"{url} : réponse JSON invalide — {error}") from error
+        raise CollectionError(
+            f"{redact_url(url)} : réponse JSON invalide — {error}"
+        ) from error

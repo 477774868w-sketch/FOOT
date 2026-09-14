@@ -29,11 +29,13 @@ import urllib.parse
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+from foot.analysis.diagnostics import CheckReport, run_checks
 from foot.analysis.engine import AnalysisRun, Engine
 from foot.analysis.journey import JourneyResult, run_journey
 from foot.analysis.ledgerbook import ForecastBook, record_run
 from foot.analysis.request import DEFAULT_TIMEZONE, parse_requests, resolve_timezone
 from foot.analysis.supervisor import LedgerJob, Supervisor
+from foot.collect.cache import Cache
 from foot.collect.supplements import SupplementSet
 from foot.markets.portfolio import build_ticket, plan_stakes
 from foot.report.card import render_card, render_rubric_grid
@@ -43,6 +45,7 @@ __all__ = [
     "access_token",
     "analyse_form",
     "build_page",
+    "render_checks",
     "render_form",
     "render_result",
     "serve",
@@ -115,8 +118,11 @@ _FORM = """
     <code>BTTS:oui=</code> — un marché sans prix ne peut pas être comparé.</p>
   <div class="row">
     <div>
-      <label for="date">Date et heure de l'analyse (as_of)</label>
+      <label for="date">Date et heure de l'analyse</label>
       <input type="datetime-local" id="date" name="date" value="{date}">
+      <p class="hint">Vide&nbsp;: analyse <strong>maintenant</strong>, avec ce
+        que la collecte rapporte. Une date remplie <strong>rejoue</strong> cet
+        instant&nbsp;: rien de publié après n'y entre.</p>
     </div>
     <div>
       <label for="tz">Fuseau horaire</label>
@@ -131,11 +137,14 @@ _FORM = """
     <button type="submit" name="action" value="analyser">Analyser</button>
     <button type="submit" name="action" value="suivre" class="second">Suivre</button>
     <button type="submit" name="action" value="bilan" class="second">Bilan</button>
+    <button type="submit" name="action" value="controle" class="second">Contrôles</button>
   </div>
   <p class="hint"><strong>Analyser</strong> produit une fiche par rencontre.
     <strong>Suivre</strong> lance le contrôle T−75/T−60 côté serveur — il
     continue même si vous fermez l'onglet. <strong>Bilan</strong> mesure les
-    prévisions déjà enregistrées.</p>
+    prévisions déjà enregistrées. <strong>Contrôles</strong> appelle réellement
+    vos fournisseurs sur la rencontre saisie et dit, famille par famille, ce qui
+    revient — sans jamais afficher une clé.</p>
   <details class="ctx">
     <summary>Mises et combiné (facultatif)</summary>
     <div class="row">
@@ -445,6 +454,43 @@ def _render_measurement(supervisor: Supervisor | None) -> str:
     return _escape_block("Bilan mesuré", report)
 
 
+def render_checks(report: CheckReport) -> str:
+    """The Contrôles screen: what each service actually returned, just now."""
+    verdict = (
+        '<div class="note">Tout ce qui a été demandé est revenu. '
+        "Les chiffres ci-dessous sont mesurés, pas annoncés.</div>"
+        if report.ready
+        else '<div class="note">Une ligne au moins n\'est pas au vert. '
+        "Le symbole dit laquelle&nbsp;: <code>●</code> obtenu · "
+        "<code>◐</code> service joignable mais rien à servir · "
+        "<code>✗</code> refusé (clé ou quota) · <code>○</code> injoignable · "
+        "<code>·</code> clé absente.</div>"
+    )
+    return verdict + _escape_block("Contrôle des connexions", report.render())
+
+
+def _run_checks_screen(
+    engine: Engine, *, matches: str, bookmaker: str, zone: str, cache: Cache | None = None
+) -> str:
+    """Run the control on the first line typed, or explain what is missing."""
+    line = matches.strip().splitlines()[0] if matches.strip() else ""
+    if not line:
+        return (
+            '<div class="note">Saisissez une rencontre à venir, puis appuyez de '
+            "nouveau sur <strong>Contrôles</strong>&nbsp;: le contrôle appelle "
+            "les fournisseurs <em>sur cette rencontre</em>, faute de quoi il ne "
+            "vérifierait rien de réel.</div>"
+        )
+    report = run_checks(
+        engine,
+        fixture_line=line,
+        bookmaker=bookmaker,
+        timezone=zone,
+        cache=cache,
+    )
+    return render_checks(report)
+
+
 def _start_watch(
     supervisor: Supervisor | None,
     *,
@@ -494,6 +540,7 @@ def make_handler(
     book: ForecastBook | None = None,
     supervisor: Supervisor | None = None,
     measurement: Callable[[LedgerJob], str] | None = None,
+    cache: Cache | None = None,
 ) -> type[http.server.BaseHTTPRequestHandler]:
     """Build a request handler bound to one engine instance.
 
@@ -507,6 +554,9 @@ def make_handler(
         measurement: what **Bilan** runs in the background. It is injected
             because collecting results is the caller's business — which
             provider, which season — and this module's business is the screen.
+        cache: the store the analyses already fill. **Contrôles** reads through
+            it so that checking the connections does not spend a second set of
+            credits on data fetched minutes earlier.
     """
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -562,9 +612,13 @@ def make_handler(
             if not self._authorised():
                 self._refuse()
                 return
-            now = dt.datetime.now(resolve_timezone(DEFAULT_TIMEZONE))
+            # The date field is left **empty**: an empty field means "now", and
+            # pre-filling it with the current time turned the ordinary journey
+            # — open, type the teams, press Analyser — into a replay of the
+            # minute the page happened to be loaded. A replay is a deliberate
+            # choice, so it has to be typed deliberately.
             self._send(
-                build_page(date=now.strftime("%Y-%m-%dT%H:%M")),
+                build_page(),
                 cookie=self._supplied_token() if token else "",
             )
 
@@ -602,6 +656,14 @@ def make_handler(
                     if supervisor is not None and measurement is not None:
                         supervisor.measure_async(measurement)
                     body = _render_ledger(book, supervisor)
+                elif action == "controle":
+                    body = _run_checks_screen(
+                        engine,
+                        matches=matchs,
+                        bookmaker=bookmaker,
+                        zone=zone,
+                        cache=cache,
+                    )
                 elif action == "suivre":
                     body = _start_watch(
                         supervisor,
@@ -662,6 +724,7 @@ def serve(
     book: ForecastBook | None = None,
     watch_engine: Engine | None = None,
     measurement: Callable[[LedgerJob], str] | None = None,
+    cache: Cache | None = None,
 ) -> None:
     """Run the interface until interrupted.
 
@@ -704,6 +767,7 @@ def serve(
         book=book,
         supervisor=supervisor,
         measurement=measurement,
+        cache=cache,
     )
     with Server((host, port), handler) as httpd:
         if scheme == "https":

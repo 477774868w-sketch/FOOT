@@ -333,6 +333,17 @@ class Engine:
         self._rubrics = _load_grid(self._config.rubrics_path)
 
     @property
+    def registry(self) -> Registry:
+        """The providers this engine was built with, exactly as built.
+
+        Exposed so the connection check can interrogate **these** adapters —
+        the ones the analyses use, with their key, their cache and their clock —
+        instead of constructing look-alikes that might be configured differently
+        and would then report on something the operator never runs.
+        """
+        return self._registry
+
+    @property
     def criteria(self) -> RankingCriteria:
         return self._criteria
 
@@ -1003,7 +1014,9 @@ class Engine:
         # price taken from another bookmaker stays identified as such.
         for source in self._market_sources:
             try:
-                quoted = source.market_prices(fixture)
+                # The bookmaker named for *this* run, not the one the source was
+                # built with: the browser picks it per analysis.
+                quoted = source.market_prices(fixture, prefer=bookmaker or "")
             except Exception:
                 continue
             for key, (price, moment, book) in quoted.items():

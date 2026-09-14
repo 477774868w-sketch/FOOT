@@ -16,6 +16,7 @@ from pathlib import Path
 
 from foot import __version__
 from foot.analysis.closing import load_closing_csv, load_closing_from_sources
+from foot.analysis.diagnostics import run_checks
 from foot.analysis.engine import Engine, EngineConfig
 from foot.analysis.journey import JourneyResult, run_journey
 from foot.analysis.ledgerbook import DEFAULT_BOOK, ForecastBook, record_run
@@ -443,11 +444,21 @@ def command_demo(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 
 
+def _build_cache(args: argparse.Namespace) -> Cache | None:
+    """The dated store the providers share, unless the run disabled it.
+
+    One function rather than three copies: the analysis, the control screen and
+    the coverage probe must read the *same* store, or checking the connections
+    would spend credits on data the analysis fetched a minute earlier.
+    """
+    if getattr(args, "no_cache", False):
+        return None
+    return Cache(args.cache, ttl_seconds=args.cache_ttl)
+
+
 def _build_registry(args: argparse.Namespace) -> Registry:
     """Assemble the providers, with a dated cache unless disabled."""
-    cache = None if getattr(args, "no_cache", False) else Cache(
-        args.cache, ttl_seconds=args.cache_ttl
-    )
+    cache = _build_cache(args)
     providers: list[Provider] = [
         OpenFootballProvider(cache),
         FootballDataProvider(cache),
@@ -741,6 +752,42 @@ def command_couverture(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_controle(args: argparse.Namespace) -> int:
+    """Call every configured service on one real fixture, and report what came.
+
+    The same function the **Contrôles** button runs, so the phone and the
+    terminal cannot disagree about whether a key works. Nothing here is deduced
+    from a declared capability: each family is requested, and what came back is
+    what is printed.
+    """
+    load_credentials()
+    line = " ".join(args.rencontre).strip()
+    engine = Engine(
+        _build_registry(args),
+        config=EngineConfig(
+            timezone=args.fuseau,
+            rubrics_path=Path(args.protocole) if args.protocole else None,
+        ),
+    )
+    report = run_checks(
+        engine,
+        fixture_line=line,
+        bookmaker=getattr(args, "bookmaker", "") or "",
+        timezone=args.fuseau,
+        cache=_build_cache(args),
+    )
+    print(_heading("CONTRÔLE DES CONNEXIONS"))
+    print(report.render())
+    print()
+    print(
+        "Aucune clé n'apparaît ci-dessus : les messages des fournisseurs sont "
+        "nettoyés avant affichage.\n"
+        "Un ◐ n'est pas une panne : le service a répondu et n'avait rien à "
+        "servir pour cette rencontre."
+    )
+    return 0 if report.ready else 1
+
+
 def command_rubriques(args: argparse.Namespace) -> int:  # noqa: ARG001
     """Print the investigation grid and what each rubric needs."""
     print(_heading("GRILLE DES 22 RUBRIQUES"))
@@ -797,6 +844,7 @@ def command_web(args: argparse.Namespace) -> int:
         certfile=args.certificat or "",
         keyfile=args.cle or "",
         book=ForecastBook(args.journal) if args.journal else None,
+        cache=_build_cache(args),
         watch_engine=_watch_engine(args),
         measurement=_measurement_task(args, engine)
         if args.journal
@@ -1223,6 +1271,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _data_options(couverture)
     couverture.set_defaults(handler=command_couverture)
+
+    controle = subparsers.add_parser(
+        "controle",
+        help="appeler réellement les fournisseurs sur une rencontre et dire ce qui revient",
+    )
+    controle.add_argument(
+        "rencontre",
+        nargs="+",
+        help="la rencontre à contrôler, écrite comme dans le formulaire",
+    )
+    controle.add_argument("--fuseau", default=DEFAULT_TIMEZONE)
+    controle.add_argument("--bookmaker", default="", help="bookmaker à privilégier")
+    _data_options(controle)
+    controle.set_defaults(handler=command_controle)
 
     rubriques = subparsers.add_parser("rubriques", help="afficher la grille des 22 rubriques")
     rubriques.set_defaults(handler=command_rubriques)
