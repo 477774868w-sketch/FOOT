@@ -32,6 +32,8 @@ from foot.collect import (
     Provider,
     Registry,
 )
+from foot.collect.apifootball import CREDENTIAL as API_FOOTBALL_CREDENTIAL
+from foot.collect.apifootball import ApiFootballProvider
 from foot.collect.base import (
     ClosingSource,
     CollectionError,
@@ -459,6 +461,9 @@ def _build_registry(args: argparse.Namespace) -> Registry:
     odds = OddsApiProvider(cache, bookmaker=getattr(args, "bookmaker", "") or "")
     if odds.configured:
         providers.append(odds)  # type: ignore[arg-type]
+    sports = ApiFootballProvider(cache)
+    if sports.configured:
+        providers.append(sports)  # type: ignore[arg-type]
     results_csv = getattr(args, "resultats_csv", None)
     odds_csv = getattr(args, "cotes_csv", None)
     fixtures_csv = getattr(args, "calendrier_csv", None)
@@ -699,6 +704,35 @@ def command_config(args: argparse.Namespace) -> int:
     print(
         "\nAucun engagement payant n'est pris par ce logiciel. Les prix ci-dessus\n"
         "sont ceux annoncés par les fournisseurs : vérifiez-les avant de souscrire."
+    )
+    return 0
+
+
+def command_couverture(args: argparse.Namespace) -> int:
+    """Measure, field by field, what the configured account actually receives.
+
+    A generic "statistics available" is never turned into a confirmation of xG,
+    npxG, shots or cards: each field is looked for by name in the response, and
+    served / present-but-null / absent are told apart.
+    """
+    load_credentials()
+    cache = None if args.no_cache else Cache(args.cache, ttl_seconds=args.cache_ttl)
+    provider = ApiFootballProvider(cache)
+    print(_heading("COUVERTURE API-FOOTBALL, CHAMP PAR CHAMP"))
+    if not provider.configured:
+        print(
+            f"Aucune clé dans {API_FOOTBALL_CREDENTIAL}. L'adaptateur est écrit et "
+            f"testé sur réponses enregistrées ; ce que VOTRE compte reçoit ne peut "
+            f"être mesuré qu'avec une clé.\n"
+            f"Voir COUTS.md avant tout abonnement — rien n'est engagé ici."
+        )
+        return 0
+    matrix = provider.coverage(tuple(args.competitions), tuple(args.saisons))
+    print(matrix.render())
+    print()
+    print(
+        "Ce tableau est mesuré sur les réponses reçues, pas sur la documentation "
+        "du fournisseur."
     )
     return 0
 
@@ -1174,6 +1208,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"écrire un {CREDENTIALS_FILE} vide à remplir (jamais committé)",
     )
     config.set_defaults(handler=command_config)
+
+    couverture = subparsers.add_parser(
+        "couverture",
+        help="mesurer, champ par champ, ce que le compte API-Football reçoit",
+    )
+    couverture.add_argument(
+        "--competitions", nargs="+", default=["en.1", "it.1"],
+        help="clés de compétition à sonder",
+    )
+    _data_options(couverture)
+    couverture.set_defaults(handler=command_couverture)
 
     rubriques = subparsers.add_parser("rubriques", help="afficher la grille des 22 rubriques")
     rubriques.set_defaults(handler=command_rubriques)

@@ -24,6 +24,9 @@ from foot.collect.catalogue import (
     AccessState,
     CatalogueEntry,
     CatalogueReport,
+    CostModel,
+    Coverage,
+    ProviderCard,
 )
 from foot.collect.credentials import describe, load_credentials, sample_file
 from foot.collect.footballdata_org import (
@@ -296,10 +299,28 @@ def test_a_card_alone_never_claims_the_provider_works() -> None:
 
 
 def test_an_unbuilt_provider_is_never_reported_as_reachable() -> None:
-    card = next(c for c in PROVIDER_CATALOGUE if c.key == "api-football")
+    """Sans adaptateur, joignable ou non, rien ne peut lire la donnée."""
+    card = ProviderCard(
+        key="imaginaire",
+        name="Fournisseur sans adaptateur",
+        adapter="",
+        declared=frozenset({Capability.ADVANCED_STATS}),
+        coverage=Coverage(),
+        cost=CostModel(free_tier="—"),
+    )
     assert not card.built
-    assert card.state(Reachability.OK) is AccessState.NOT_BUILT, (
-        "aucun adaptateur : joignable ou non, rien ne peut en lire la donnée"
+    assert card.state(Reachability.OK) is AccessState.NOT_BUILT
+
+
+def test_api_football_is_built_and_still_waits_for_a_key() -> None:
+    """L'adaptateur existe ; ce que le compte reçoit reste une autre question."""
+    card = next(c for c in PROVIDER_CATALOGUE if c.key == "api-football")
+    assert card.built, "l'adaptateur est écrit"
+    assert card.credential == "API_FOOTBALL_KEY"
+    if not card.credential_present():
+        assert card.state(Reachability.OK) is AccessState.NEEDS_KEY
+    assert "CHAMP PAR CHAMP" in card.note, (
+        "la carte ne doit pas laisser croire que tous les champs sont servis"
     )
 
 

@@ -34,7 +34,7 @@ from foot.collect.base import (
 from foot.collect.footballdata import FootballDataProvider
 from foot.collect.manual import ManualProvider
 from foot.collect.registry import Registry
-from foot.collect.supplements import load_supplements
+from foot.collect.supplements import load_supplements, supplements_from_text
 from foot.data.csv_source import write_matches
 from foot.domain import Fixture, Match, MatchLog, Score
 from foot.markets.catalogue import standard_catalogue
@@ -820,8 +820,23 @@ def test_r8j_the_card_keeps_the_three_unavailability_states_apart() -> None:
     assert "faute de source accessible" not in card, (
         "un motif unique ne peut pas couvrir trois états distincts"
     )
-    for label in ("non développé", "à fournir par l'opérateur"):
+    # Two states arise without any import: nothing written at all, and written
+    # but waiting for a key. Since API-Football's adapter exists, a rubric only
+    # reaches « à fournir par l'opérateur » once the operator actually supplies
+    # something — which the next assertions exercise.
+    for label in ("non développé", "adaptateur écrit"):
         assert label in card, f"état absent de la fiche : {label}"
+
+    supplied = _engine().run(
+        "Club A - Club B 14/09/2026 20:45 @ 2.10 3.40 3.60",
+        as_of=AS_OF,
+        supplements=supplements_from_text(
+            xg="date,home,away,home_xg,away_xg\n13/09/2026,Club A,Club B,1.8,0.9\n",
+        ),
+    )
+    covered = supplied.analyses[0]
+    filled = [a for a in covered.rubrics if a.implementation.value.startswith("opérationnel sur")]
+    assert filled, "une donnée fournie doit produire l'état « données fournies »"
 
 
 # =========================================================================== #

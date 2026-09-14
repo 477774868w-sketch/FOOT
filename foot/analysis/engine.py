@@ -1188,7 +1188,12 @@ class Engine:
                 implementation = RubricImplementation.OPERATOR_SUPPLIED
                 gap = frozenset()
             if gap:
-                blocker = {
+                # An operator who has just pasted a file must be told why it was
+                # refused — before being told which key would have avoided the
+                # paste. Sending them to buy a subscription to fix a typo in a
+                # team name is the least useful possible answer.
+                refused = _unusable_import(rubric, supplied)
+                blocker = refused or {
                     RubricImplementation.BUILT_UNREACHABLE: (
                         f"adaptateur {rubric.adapter} écrit ; "
                         + _capability_remedy(gap)

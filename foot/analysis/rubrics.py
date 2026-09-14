@@ -300,6 +300,7 @@ RUBRICS: tuple[Rubric, ...] = (
        sections=("§5",)),
     _r(7, "Buts, xG, npxG, xGA, tirs, grosses occasions, qualité des tirs", RubricPhase.SPORT,
        [Capability.ADVANCED_STATS], feeds_model=True,
+       adapter="foot.collect.apifootball",
        operator_import="--xg-csv",
        treatment="comparaison buts marqués / xG sur les dix derniers matchs, "
                  "régularisée (postérieur Gamma-Poisson)",
@@ -329,7 +330,8 @@ RUBRICS: tuple[Rubric, ...] = (
         effect="un changement de gardien déclenche une réévaluation du dossier",
        sections=("§8",)),
     _r(11, "Absences, retours, minutes attendues et interactions", RubricPhase.SPORT,
-        [Capability.INJURIES], operator_import="--absences-csv",
+        [Capability.INJURIES], adapter="foot.collect.apifootball",
+        operator_import="--absences-csv",
         treatment="liste d'absences avec poste et statut de confirmation",
         effect="produit un scénario sportif documenté, cité en source, qui peut "
                "faire rejeter un pari ; n'applique aucun coefficient arbitraire",

@@ -295,7 +295,7 @@ PROVIDER_CATALOGUE: tuple[ProviderCard, ...] = (
     ProviderCard(
         key="api-football",
         name="API-Football (api-sports)",
-        adapter="",
+        adapter="foot.collect.apifootball",
         declared=frozenset(
             {
                 Capability.RESULTS,
@@ -320,18 +320,21 @@ PROVIDER_CATALOGUE: tuple[ProviderCard, ...] = (
         credential="API_FOOTBALL_KEY",
         homepage="https://www.api-football.com/",
         note=(
-            "AUCUN adaptateur écrit à ce jour. C'est le fournisseur qui "
-            "débloquerait absences et xG automatiques ; c'est donc le premier à "
-            "développer si vous ouvrez un compte."
+            "Adaptateur écrit et testé sur réponses enregistrées. Il couvrirait "
+            "absences, compositions et statistiques — mais un plan peut servir "
+            "les tirs sans servir les xG : « foot couverture » le mesure CHAMP "
+            "PAR CHAMP avant toute dépense."
         ),
     ),
 )
 """Every provider considered, built or not.
 
-Listing an unbuilt provider is deliberate: knowing that API-Football would cover
-injuries and xG — and that nothing here reads it yet — is what lets the operator
-decide whether to pay for it. Hiding it would make the gap look like an absence
-of options.
+An entry here is a card, never a promise: ``built`` says an adapter exists,
+``credential_present()`` says a key is configured, and only :meth:`probe` says
+what the account actually receives. API-Football is the case that makes the
+distinction worth keeping — its adapter is written and tested, and whether *your*
+plan serves xG is still an open question until the field-by-field coverage is
+measured.
 """
 
 
