@@ -273,6 +273,7 @@ Extrait de la fiche :
 | `foot suivre` | exécute le contrôle T−75/T−60 et réessaie jusqu'au coup d'envoi |
 | `foot journal` | relit les prévisions écrites avant match, jamais réécrites |
 | `foot mesurer` | apparie le journal aux résultats et le note — **sans rien y réécrire** |
+| `foot config` / `foot fournisseurs --couverture` | ce que chaque clé débloque et coûte, mesuré ([COUTS.md](COUTS.md)) |
 | `foot config` | quelles clés sont posées, ce qu'elles débloquent, ce qu'elles coûtent |
 | `foot fournisseurs` | sonde chaque source ; `--couverture` ajoute coût et accès réel |
 | `foot rubriques` | la grille des 22 rubriques et ce que chacune exige |
@@ -292,6 +293,7 @@ Options utiles de `analyser` :
 | `--protocole fichier.json` | remplace la grille des 22 rubriques |
 | `--journal [fichier]` | consigne les prévisions en ajout seul, pour les mesurer plus tard |
 | `--motif "…"` | la raison de cette exécution, portée au journal |
+| `--provenance` | par rubrique : la donnée, sa source et sa fraîcheur |
 
 ---
 

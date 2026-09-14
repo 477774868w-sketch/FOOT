@@ -869,3 +869,71 @@ masquer serait une autre forme de malhonnêteté — mais aucune conclusion n'es
 Et quel que soit l'effectif, **un intervalle de confiance qui contient zéro
 interdit d'annoncer un avantage**. C'est le cas sur les 80 rencontres du §12.2 :
 l'effectif suffit au premier garde-fou, et le second l'arrête quand même.
+
+
+---
+
+## 13. Cinquième revue indépendante du commit `74d1fa3` — corrections
+
+Neuf défauts reproduits puis corrigés, avec `tests/test_regression_review5.py`
+(37 tests qui échouent tous sur `74d1fa3`).
+
+### 13.1 Reproductions, aux valeurs exactes de la revue
+
+| # | Reproduit sur `74d1fa3` | Correction |
+|---|---|---|
+| 1 | Contrôles à 19:30, 19:45, 19:50 : **trois âges nuls** pour une cote saisie une seule fois | Le suivi fixe l'heure du relevé au premier contrôle et ne la fait plus avancer. Relancer l'analyse ne rend pas un prix plus frais. |
+| 2 | Compositions relues au cache de six heures : un « rien publié » lu à T−75 resservi à T−60 | `WATCH_CACHE_TTL` = 120 s, `Cache.with_ttl` : même stockage, fraîcheur adaptée au suivi, compatible avec les quotas. Le véritable adaptateur est testé avec son cache. |
+| 3 | Réponse sans composition → `ValueError` (Evidence `UNAVAILABLE` avec valeur), avalée par le moteur | Valeur nulle côté adaptateur ; et l'échec d'une source est **inscrit au registre** au lieu d'être silencieux — « aucune composition publiée » et « source en panne » sont deux états. |
+| 4 | Suivi arrêté sur **deux joueurs**, un par équipe, annonçant « composition officielle » | Deux feuilles officielles **complètes** (onze titulaires chacune) **et** le passage du contrôle T−60 — c'est entre T−75 et T−60 que les compositions changent. |
+| 5 | `Forecast.key` sans date : 14 et 21 septembre réduits à une rencontre | La date entre dans l'identité. Les anciens journaux restent lisibles sans qu'aucune date leur soit attribuée ; quand une ligne ancienne et une datée tombent sur le même match, la datée l'emporte et l'autre est **déclarée écartée**. |
+| 6 | `measure()` : `as_of` explicitement ignoré, une prévision écrite après le match évaluée | Quatre instants distingués — enregistrement réel, instant historique simulé, coup d'envoi, date limite du rapport. La dernière prévision **admissible** est choisie chronologiquement, pas par ordre d'ajout. Un rejeu rétrospectif est exclu du bilan sauf `--avec-rejeux`. |
+| 7 | `offer_for_key("OU:4.5:under")` → `OU:4.5:over` | Le mot explicite l'emporte sur le signe ; chaque clé canonique se relit en elle-même. **Le pari inverse était réglé, silencieusement.** |
+| 8 | `AH:H:-1.75` et `OU:4.5:over` → `profit=None`, disparus du rendement | L'évaluation règle par `offer_for_key`, le résolveur du moteur. Un marché recommandable est réglable. |
+| 9 | « Manchester United » correspond, « Manchester United FC » fait disparaître le prix | Repli par `normalise()`, date et paire toujours exactes, **refus explicite** quand deux événements se replient sur la même paire. `normalise` replie aussi « F.C. » sur « fc ». |
+| 10 | `closing = {}`, jamais alimenté : « aucune source joignable » sans la moindre tentative | `foot/analysis/closing.py` collecte par import explicite ou par les sources du registre. `ClosingState` distingue **non raccordé / inaccessible / servi**, et une clôture est appariée par rencontre **et marché**. |
+
+### 13.2 Ce que la revue a révélé au-delà de ses dix points
+
+Deux défauts trouvés en corrigeant, corrigés aussi :
+
+* un contrôle qui ne changeait rien était annoncé « DÉCISION MODIFIÉE » —
+  l'empreinte du dossier est datée, donc elle bougeait à chaque relecture. La
+  comparaison porte désormais sur la substance ;
+* **l'affirmation de non-recouvrement du §12.2 était fausse** : 30 des 110
+  rencontres appartenaient à l'échantillon de validation. Vérifié par
+  intersection, corrigé, identifiants publiés (§12.2).
+
+### 13.3 Usage quotidien : ce qui a été ajouté
+
+| Fonction | Preuve |
+|---|---|
+| Trois actions sur l'écran du téléphone — Analyser, Suivre, Bilan | parcours complet exécuté sur serveur réel, les trois boutons appelés sur une rencontre réelle |
+| Suivi exécuté **côté serveur**, survivant à la fermeture de l'onglet | `foot/analysis/supervisor.py`, 5 tests |
+| Journal sauvegardable et **restaurable** | fichier en ajout seul ; un test copie, restaure et relit à l'identique |
+| Provenance et fraîcheur **rubrique par rubrique** | `foot analyser --provenance` |
+| Coûts, quotas et couverture avant tout abonnement | [COUTS.md](COUTS.md), et `foot config` / `foot fournisseurs --couverture` |
+
+### 13.4 Limites restantes, nommées
+
+* **xG et absences : non développées.** C'est le premier manque, il pèse sur 5
+  rubriques, et il suppose un adaptateur à écrire **et** un abonnement (§COUTS).
+* **Écart au prix de clôture : non mesuré ici.** Le code existe et est testé ;
+  la source gratuite qui le servirait est injoignable depuis cet environnement.
+  Un import explicite (`--clotures-csv`) contourne la contrainte.
+* **Un suivi ne survit pas au redémarrage du serveur.** Un planificateur durable
+  est une autre promesse ; l'annoncer sans un stockage résistant au redémarrage
+  serait exactement le mécanisme annoncé-mais-absent que ce projet refuse.
+* **Aucun avantage prédictif démontré.** Sur 80 rencontres disjointes,
+  l'intervalle de confiance de l'écart de RPS contient zéro (§12.2).
+
+### 13.5 Vérifications
+
+```
+pytest -m "not network"      389 réussis, 1 ignoré
+python3 tests/run_tests.py --sans-reseau
+                             389 réussi(s), 0 échec(s), 1 ignoré(s) sur 390
+ruff check .                 propre
+mypy .                       propre, 97 fichiers
+protocole synchronisé        protocole/protocole-22-rubriques.json == dump_rubrics()
+```

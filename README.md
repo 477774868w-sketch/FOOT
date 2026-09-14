@@ -6,7 +6,8 @@ A rigorous football (soccer) modelling engine in pure Python. **No dependencies.
 > sportif scellé avant lecture des cotes, grille des 22 rubriques, comparaison
 > des marchés et une décision par rencontre :
 > **[TELEPHONE.md](TELEPHONE.md)** pour le parcours depuis un téléphone, une
-> page ; **[GUIDE.md](GUIDE.md)** pour l'utilisation complète ;
+> page, **sans aucune commande quotidienne** ; **[COUTS.md](COUTS.md)** pour ce
+> que coûterait la suite, avant tout engagement ; **[GUIDE.md](GUIDE.md)** pour l'utilisation complète ;
 > **[AUDIT.md](AUDIT.md)** pour la correspondance avec le protocole, l'état
 > vérifié des fournisseurs, et ce qui fonctionne / attend une clé / reste à
 > développer.
