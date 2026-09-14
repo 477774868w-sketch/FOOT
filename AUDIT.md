@@ -1192,3 +1192,115 @@ Le raccordement est fait et prouvé **sur réponses simulées**. Ce qu'une clé
 gratuite dira encore — et que personne ne peut affirmer d'ici — c'est quels
 champs le plan sert réellement : `foot couverture` est là pour le mesurer champ
 par champ, championnat par championnat, avant toute dépense.
+
+
+---
+
+## 16. Huitième revue du commit `d16e98f` — trois défauts avant la vraie clé
+
+Reproduits avec le **véritable moteur**, le **véritable adaptateur** et une
+horloge qui avance à chaque réponse. Aucun réseau : le garde-fou du §15.6
+l'interdit, et l'adaptateur reçoit son horloge et son *fetcher*.
+
+### 16.1 Une collecte fraîche s'excluait de sa propre analyse
+
+```
+AVANT                                   APRÈS
+lancement         12:00:00              lancement         12:00:00
+collecte terminée 12:00:16              collecte terminée 12:00:16
+reçu : 1 absence, 22 joueurs            reçu : 1 absence, 22 joueurs
+absences aux constats : 0               absences aux constats : 2
+joueurs au plan       : 0               joueurs au plan       : 22
+```
+
+`Engine.run()` fixe `as_of` **avant** les appels réseau ; l'adaptateur date la
+réponse à l'heure de réception. Quelques secondes plus tard, la donnée devenait
+« postérieure à l'analyse » — l'analyse rejetait ce qu'elle venait elle-même de
+chercher.
+
+La correction sépare deux régimes :
+
+* **analyse courante** — la coupure avance jusqu'à l'instant où la collecte s'est
+  réellement terminée, et **seulement** jusque-là. Un lancement à midi ne devient
+  pas une licence pour voir tout ce qui s'est passé depuis ;
+* **rejeu** — la date demandée est conservée strictement. Cette date *est* la
+  question posée ; la déplacer en poserait une autre.
+
+**Rien n'est antidaté.** Chaque ligne garde l'heure de publication que sa source
+lui a donnée ; c'est la coupure qui bouge, jamais la donnée. Un test le vérifie
+séparément.
+
+Les deux surfaces déclarent explicitement le régime demandé : toutes deux
+calculent un instant avant d'appeler, donc aucune ne peut être devinée à
+l'absence d'`as_of`. Sans `--date`, le terminal analyse *maintenant* ; avec, il
+rejoue. Le champ date vide du navigateur dit la même chose.
+
+Testé aussi au **premier lancement sans cache** et **après expiration du cache**,
+avec l'horloge qui avance entre les deux.
+
+### 16.2 La rencontre était reconnue, ses données perdaient leur équipe
+
+```
+AVANT                                   APRÈS
+_fixture_id      : trouvé               _fixture_id      : trouvé
+2 stats reçues   → 0 ligne xG           2 stats reçues   → 1 ligne xG
+absence pour     : 'Arsenal'            absence pour     : 'Arsenal FC'
+22 joueurs pour  : Arsenal, Chelsea     11 + 11 pour     : Arsenal FC, Chelsea FC
+```
+
+`_fixture_id()` repliait déjà les noms pour **trouver** le match ; tout ce qui
+était lu ensuite arrivait étiqueté du nom du fournisseur, qui ne correspond à
+rien en aval. Le match était trouvé et ses données perdues.
+
+`TeamAlignment` construit la correspondance **une fois par rencontre** et
+l'applique aux trois familles. Elle conserve l'orthographe du fournisseur pour la
+traçabilité (`API-Football (reçu sous « Arsenal »)`), **refuse les ambiguïtés** —
+deux noms qui se replient sur le même camp n'en rattachent aucun — et écarte une
+ligne qui n'appartient à aucun des deux camps plutôt que de la rattacher à une
+supposition.
+
+### 16.3 « Contexte retenu » comptait des données écartées
+
+```
+AVANT   Contexte retenu : 1 ligne xG, 1 absence, 22 compositions
+        (alors que le dossier avait écarté l'absence et les compositions)
+
+APRÈS   Contexte retenu : 1 ligne(s) xG — collectées par API-Football ;
+        23 ligne(s) reçue(s) mais écartée(s) (postérieure(s) à l'analyse, ou
+        étrangère(s) à cette rencontre)
+```
+
+Le décompte se faisait **avant** la coupure. Il se fait désormais **après**, et
+seulement sur les lignes qui concernent cette rencontre : reçu, retenu et écarté
+sont trois nombres distincts. Un paragraphe de contexte se lit comme la liste de
+ce sur quoi repose la recommandation — il ne peut pas contredire l'analyse qu'il
+introduit. Terminal et navigateur rendent le même texte, ce qu'un test compare
+caractère pour caractère.
+
+### 16.4 Un défaut trouvé en corrigeant
+
+Le test qui prétendait exercer « feuille absente à T−75, publiée plus tard » ne
+l'exerçait pas : la doublure devinait l'heure au **nombre d'appels reçus**, donc
+publiait dès le premier. Elle lit maintenant la même horloge que la boucle, et le
+scénario se déroule vraiment :
+
+```
+19:30 → 0 joueur   19:45 → 0   19:50 → 0   19:55 → 22   arrêt : T−60 effectué
+```
+
+Une doublure qui devine le temps au nombre d'appels teste sa propre comptabilité,
+pas le code.
+
+### 16.5 Vérifications
+
+```
+pytest -m "not network"      455 réussis, 1 ignoré
+python3 tests/run_tests.py --sans-reseau
+                             455 réussi(s), 0 échec(s), 1 ignoré(s) sur 456
+ruff check .                 propre
+mypy .                       propre, 102 fichiers
+```
+
+Séparation sport/cotes et protections chronologiques conservées : la coupure
+n'avance que pour une analyse courante, bornée par sa propre collecte, et le
+dossier reste scellé avant toute lecture de cote.
