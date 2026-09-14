@@ -399,7 +399,7 @@ class Engine:
         supplied: SupplementSet,
         history: MatchLog,
         as_of: dt.datetime,
-    ) -> tuple[SupplementSet, list[Evidence]]:
+    ) -> tuple[SupplementSet, list[Evidence], dict[str, set[tuple[object, ...]]]]:
         """Collect every automatic context, before the cut and before the seal.
 
         Three families, three sources, one door. Adding a provider to the
@@ -409,7 +409,16 @@ class Engine:
         Everything collected here still crosses ``available_at`` afterwards, so
         an automatic source never sees further into the future than a human one.
         """
+        added: dict[str, set[tuple[object, ...]]] = {
+            "xg": set(),
+            "absences": set(),
+            "lineups": set(),
+        }
+        sheets_before = {_identity("lineups", row) for row in supplied.lineups}
         extra, evidence = self._collect_sheets(fixture, supplied)
+        added["lineups"] = {
+            _identity("lineups", row) for row in extra.lineups
+        } - sheets_before
         rows = list(extra.absences)
         known = {
             (row.team.casefold(), row.player.casefold(), row.date)
@@ -428,6 +437,7 @@ class Engine:
                     continue
                 known.add(signature)
                 rows.append(row)
+                added["absences"].add(_identity("absences", row))
         if len(rows) != len(extra.absences):
             extra = replace(extra, absences=tuple(rows))
 
@@ -448,9 +458,10 @@ class Engine:
                         continue
                     seen.add(signature)
                     collected.append(line)
+                    added["xg"].add(_identity("xg", line))
             if len(collected) != len(extra.xg):
                 extra = replace(extra, xg=tuple(collected))
-        return (extra, evidence)
+        return (extra, evidence, added)
 
     def _collect_sheets(
         self, fixture: Fixture, supplied: SupplementSet
@@ -521,6 +532,7 @@ class Engine:
         quoted_at: dt.datetime | None = None,
         supplements: SupplementSet | None = None,
         watching: bool = False,
+        live: bool | None = None,
     ) -> AnalysisRun:
         """Analyse every line of ``text``.
 
@@ -532,6 +544,12 @@ class Engine:
                 rubrics no reachable provider can serve, and are marked as
                 operator-supplied throughout so they are never mistaken for
                 corroborated data.
+            live: whether this is an analysis of *now* rather than a replay of a
+                past instant. A live run may take in what its own collection
+                brought back a few seconds later; a replay may not — its date is
+                the question being asked. Defaults to « live when no ``as_of``
+                was given », which the surfaces override explicitly because they
+                all compute an instant before calling.
             watching: true only when a live watcher — :func:`foot.analysis.watch.
                 watch_until_kickoff` — is driving this run.  It is what lets the
                 report say « suivi en cours » without any one-shot analysis
@@ -540,6 +558,7 @@ class Engine:
         zone_name = timezone or self._config.timezone
         resolve_timezone(zone_name)  # validated eagerly, so a typo fails loudly
         instant = as_of or utcnow()
+        is_live = (as_of is None) if live is None else live
         report = self._registry.probe()
         local_today = instant.astimezone(resolve_timezone(zone_name)).date()
         requests = parse_requests(text, today=local_today)
@@ -561,6 +580,7 @@ class Engine:
                     quotes=dict(request.quotes),
                     supplements=supplements or SupplementSet(),
                     watching=watching,
+                    live=is_live,
                 )
             )
         return AnalysisRun(
@@ -817,6 +837,7 @@ class Engine:
         quotes: dict[str, float] | None = None,
         supplements: SupplementSet | None = None,
         watching: bool = False,
+        live: bool = False,
     ) -> MatchAnalysis:
         if not resolved.analysable or resolved.fixture is None:
             return MatchAnalysis(resolved=resolved)
@@ -875,15 +896,27 @@ class Engine:
         # pasted, *before* the cut: collected or typed, a sheet must cross the
         # same availability filter, or an automatic source would be allowed to
         # see further into the future than a human one.
-        before = (len(extra.xg), len(extra.absences), len(extra.lineups))
-        extra, collected = self._collect_context(fixture, extra, history, as_of)
+        extra, collected, fetched = self._collect_context(
+            fixture, extra, history, as_of
+        )
         evidence.extend(collected)
-        gathered = _collection_summary(before, extra, self._collector_names())
-        # Which families the collection actually filled — read from the counts,
-        # not from a row's ``source`` column. That column names the *upstream*
-        # an operator cites when pasting ("Understat"), so reading it would call
-        # a hand-typed line automatic.
-        automatic = _filled_families(before, extra, self._collector_names())
+        # A live analysis may use what its own collection brought back: the run
+        # started at 12:00:00 and the answers arrived at 12:00:16, and treating
+        # them as « published after the analysis » excluded the data from the
+        # very analysis that fetched it. The cut therefore advances to cover the
+        # collection actually performed — and *only* that. Nothing is back-dated:
+        # each row keeps the publication instant its source gave it.
+        #
+        # A replay keeps the date it was asked about, strictly. That date is the
+        # question, and moving it would answer a different one.
+        as_of = _effective_cut(as_of, collected) if live else as_of
+        # Which families the collection actually filled — read from what it
+        # appended, not from a row's ``source`` column. That column names the
+        # *upstream* an operator cites when pasting ("Understat"), so reading it
+        # would call a hand-typed line automatic.
+        automatic = frozenset(
+            family for family, rows in fetched.items() if rows
+        ) if self._collector_names() else frozenset()
         # One input, cut once. Everything downstream — estimate, findings,
         # scenarios, lineup check, decision — reads `sport_input`, never the
         # raw history or the raw supplements, so none of them can see further
@@ -898,6 +931,13 @@ class Engine:
         )
         known_history = sport_input.history
         known_extra = sport_input.supplements
+        # Counted **after** the availability cut, and only for rows that concern
+        # this fixture. Counting before it announced « contexte retenu : 1
+        # absence » about a line the dossier had just excluded — the paragraph
+        # contradicted the analysis it introduced.
+        gathered = _collection_report(
+            fetched, known_extra, fixture, self._collector_names()
+        )
         # The T−75/T−60 plan is sporting information, so it is built *before*
         # the seal and fed the sheets the operator actually imported: a report
         # must never show an official lineup in one section and "no lineup
@@ -1304,12 +1344,12 @@ class Engine:
             # provider fetched would misattribute the work, and hide that a key
             # is doing something.
             if gap and covered:
-                fetched = _FAMILY_BY_CAPABILITY.keys() & rubric.requires
+                families = _FAMILY_BY_CAPABILITY.keys() & rubric.requires
                 implementation = (
                     RubricImplementation.OPERATIONAL
                     if any(
                         _FAMILY_BY_CAPABILITY[capability] in collected_families
-                        for capability in fetched
+                        for capability in families
                     )
                     else RubricImplementation.OPERATOR_SUPPLIED
                 )
@@ -2123,31 +2163,17 @@ def _recent_fixtures(
     return tuple(wanted)
 
 
-def _collection_summary(
-    before: tuple[int, int, int], after: SupplementSet, sources: Sequence[str]
-) -> tuple[str, ...]:
-    """Name what the automatic collection added, or say plainly that it added nothing.
+def _effective_cut(
+    requested: dt.datetime, collected: Sequence[Evidence]
+) -> dt.datetime:
+    """The instant a **live** analysis may look up to.
 
-    Counting the difference rather than the total is what keeps the operator's
-    own paste distinguishable from a provider's answer — the report must never
-    credit a source for a line somebody typed.
+    The later of what was asked for and when the collection actually finished.
+    Bounded by the collection itself: a live run does not become a licence to
+    see anything else that happened meanwhile.
     """
-    gained = (
-        len(after.xg) - before[0],
-        len(after.absences) - before[1],
-        len(after.lineups) - before[2],
-    )
-    labels = ("ligne(s) xG", "absence(s)", "ligne(s) de composition")
-    parts = [
-        f"{count} {label}"
-        for count, label in zip(gained, labels, strict=True)
-        if count > 0
-    ]
-    if not parts:
-        if not sources:
-            return ()
-        return (f"aucune donnée collectée par {', '.join(sources)}",)
-    return (f"{', '.join(parts)} — collectées par {', '.join(sources)}",)
+    observed = [item.retrieved_at for item in collected if item.retrieved_at]
+    return max([requested, *observed]) if observed else requested
 
 
 _FAMILY_BY_CAPABILITY: Mapping[Capability, str] = {
@@ -2155,17 +2181,73 @@ _FAMILY_BY_CAPABILITY: Mapping[Capability, str] = {
     Capability.INJURIES: "absences",
     Capability.LINEUPS: "lineups",
 }
+"""Which context family each capability fills."""
 
 
-def _filled_families(
-    before: tuple[int, int, int], after: SupplementSet, sources: Sequence[str]
-) -> frozenset[str]:
-    """Which context families a provider — not the operator — supplied rows for."""
+def _identity(family: str, row: object) -> tuple[object, ...]:
+    """A stable identity for one supplement row, per family."""
+    if family == "xg":
+        return (row.home.casefold(), row.away.casefold(), row.date)  # type: ignore[attr-defined]
+    return (
+        row.team.casefold(),  # type: ignore[attr-defined]
+        row.player.casefold(),  # type: ignore[attr-defined]
+        row.date,  # type: ignore[attr-defined]
+    )
+
+
+def _collection_report(
+    fetched: Mapping[str, set[tuple[object, ...]]],
+    known: SupplementSet,
+    fixture: Fixture,
+    sources: Sequence[str],
+) -> tuple[str, ...]:
+    """Received, retained, discarded — three counts, never one.
+
+    « Retained » means a row that survived the availability cut **and** belongs
+    to this match. Reporting the fetch count instead credited the analysis with
+    data it had refused, which is the one thing a context paragraph must never
+    do: it is read as the list of what the recommendation rests on.
+    """
     if not sources:
-        return frozenset()
-    grown = {
-        "xg": len(after.xg) - before[0],
-        "absences": len(after.absences) - before[1],
-        "lineups": len(after.lineups) - before[2],
-    }
-    return frozenset(name for name, count in grown.items() if count > 0)
+        return ()
+    labels = {"xg": "ligne(s) xG", "absences": "absence(s)", "lineups": "ligne(s) de composition"}
+    kept: dict[str, int] = {}
+    received: dict[str, int] = {}
+    for family, identities in fetched.items():
+        received[family] = len(identities)
+        rows = getattr(known, family, ())
+        kept[family] = sum(
+            1
+            for row in rows
+            if _identity(family, row) in identities
+            and _concerns(family, row, fixture)
+        )
+    if not any(received.values()):
+        return (f"aucune donnée collectée par {', '.join(sources)}",)
+    retained = [
+        f"{kept[family]} {labels[family]}" for family in labels if kept.get(family)
+    ]
+    dropped = sum(received[f] - kept.get(f, 0) for f in received)
+    head = (
+        f"{', '.join(retained)} — collectées par {', '.join(sources)}"
+        if retained
+        else f"aucune donnée retenue parmi celles collectées par {', '.join(sources)}"
+    )
+    if dropped:
+        head += (
+            f" ; {dropped} ligne(s) reçue(s) mais écartée(s) (postérieure(s) à "
+            f"l'analyse, ou étrangère(s) à cette rencontre)"
+        )
+    return (head,)
+
+
+def _concerns(family: str, row: object, fixture: Fixture) -> bool:
+    """Whether a surviving row belongs to *this* match."""
+    if family == "xg":
+        return True  # past matches of these teams: the form window reads them
+    team = getattr(row, "team", "")
+    if team not in (fixture.home, fixture.away):
+        return False
+    if family == "lineups":
+        return bool(getattr(row, "date", None) == fixture.date)
+    return True

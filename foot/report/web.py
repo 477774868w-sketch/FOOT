@@ -281,6 +281,7 @@ def analyse_form(
     bookmaker: str | None = None,
     pasted: Mapping[str, str] | None = None,
     supplements: SupplementSet | None = None,
+    live: bool = False,
 ) -> JourneyResult:
     """Run one submitted form through the shared journey.
 
@@ -296,6 +297,7 @@ def analyse_form(
         bookmaker=bookmaker,
         pasted=pasted,
         supplements=supplements,
+        live=live,
     )
 
 
@@ -615,6 +617,9 @@ def make_handler(
                         timezone=zone,
                         bookmaker=bookmaker or None,
                         pasted=context,
+                        # An empty date field means "now", like the terminal's
+                        # missing --date. The two surfaces must not differ here.
+                        live=not date_text,
                     )
                     body = render_result(result, budget=budget, combine=combine)
                     if book is not None:

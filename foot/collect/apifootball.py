@@ -30,7 +30,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
@@ -441,6 +441,63 @@ def parse_lineups(
     return tuple(rows)
 
 
+@dataclass(frozen=True, slots=True)
+class TeamAlignment:
+    """How a provider's club names map onto ours, for one fixture.
+
+    The provider says « Arsenal » where our calendar says « Arsenal FC ». The
+    fixture lookup already folds both to find the match; everything read
+    *afterwards* — statistics, injuries, team sheets — then arrived labelled with
+    the provider's name, which matches nothing downstream. So the match was
+    found and its data was lost.
+
+    The mapping is built once per fixture, refuses ambiguity, and keeps the
+    provider's original spelling so a reader can still audit what was received.
+    """
+
+    internal: Mapping[str, str] = field(default_factory=dict)
+    """Folded provider name → our own name."""
+
+    original: Mapping[str, str] = field(default_factory=dict)
+    """Our name → the provider's spelling, kept for traceability."""
+
+    @staticmethod
+    def build(fixture: Fixture, seen: Sequence[str]) -> TeamAlignment:
+        """Align the names a response carries with the fixture's own.
+
+        Ambiguity is refused rather than resolved: if two provider names fold
+        onto the same fixture side, neither is mapped, and the data is reported
+        unattached instead of being attached to a guess.
+        """
+        ours = [fixture.home, fixture.away]
+        folded_ours = {normalise(name): name for name in ours}
+        if len(folded_ours) < len(ours):
+            return TeamAlignment()
+        internal: dict[str, str] = {}
+        original: dict[str, str] = {}
+        claimed: dict[str, list[str]] = {}
+        for name in seen:
+            key = normalise(name)
+            if key in folded_ours:
+                claimed.setdefault(folded_ours[key], []).append(name)
+        for mine, candidates in claimed.items():
+            distinct = sorted(set(candidates))
+            if len(distinct) != 1:
+                continue  # two spellings for one side: refuse rather than pick
+            internal[normalise(distinct[0])] = mine
+            original[mine] = distinct[0]
+        return TeamAlignment(internal=internal, original=original)
+
+    def rename(self, name: str) -> str:
+        """Our name for a provider's, or the provider's own when unmapped."""
+        return self.internal.get(normalise(name), name)
+
+    def note_for(self, name: str) -> str:
+        """« reçu sous “Arsenal” » — empty when the spellings agree."""
+        received = self.original.get(name, "")
+        return f"reçu sous « {received} »" if received and received != name else ""
+
+
 def _role(position: str) -> str:
     """Map a position code onto the protocol's watched roles.
 
@@ -642,6 +699,7 @@ class ApiFootballProvider:
         except (CollectionError, ProviderBlockedError) as error:
             return ((), (self._note(fixture, str(error)),))
         rows = parse_lineups(payload, match_date=fixture.date, published_at=retrieved)
+        rows = _align_lineups(rows, fixture)
         return (
             rows,
             (
@@ -673,7 +731,7 @@ class ApiFootballProvider:
             payload, retrieved = self._get(f"/injuries?fixture={identifier}")
         except (CollectionError, ProviderBlockedError) as error:
             return ((), (self._note(fixture, str(error)),))
-        rows = parse_injuries(payload, as_of=retrieved)
+        rows = _align_absences(parse_injuries(payload, as_of=retrieved), fixture)
         return (
             rows,
             (
@@ -705,8 +763,8 @@ class ApiFootballProvider:
             payload, retrieved = self._get(f"/fixtures/statistics?fixture={identifier}")
         except (CollectionError, ProviderBlockedError) as error:
             return ((), (self._note(fixture, str(error)),))
-        rows = parse_statistics(
-            payload, match_date=fixture.date, home_team=fixture.home
+        rows = _align_statistics(
+            parse_statistics(payload, match_date=fixture.date), fixture
         )
         return (rows, tuple(row.evidence(retrieved) for row in rows))
 
@@ -955,6 +1013,65 @@ def _fixture_label(payload: object) -> str:
         if home and away:
             return f"{home} – {away} {date}".strip()
     return "rencontre sans identité lisible"
+
+
+def _align_lineups(
+    rows: Sequence[LineupRow], fixture: Fixture
+) -> tuple[LineupRow, ...]:
+    """Relabel sheet rows with our own club names, or drop what cannot be placed.
+
+    A row kept under the provider's spelling never joins a version of *this*
+    fixture's team sheet: it is read by nobody and reported by nobody, which is
+    worse than being absent. A row whose team matches neither side is dropped
+    for the same reason — attaching it to a guess would be worse still.
+    """
+    alignment = TeamAlignment.build(fixture, [row.team for row in rows])
+    placed: list[LineupRow] = []
+    for row in rows:
+        team = alignment.rename(row.team)
+        if team not in (fixture.home, fixture.away):
+            continue
+        opponent = fixture.away if team == fixture.home else fixture.home
+        placed.append(replace(row, team=team, opponent=opponent))
+    return tuple(placed)
+
+
+def _align_absences(
+    rows: Sequence[AbsenceRow], fixture: Fixture
+) -> tuple[AbsenceRow, ...]:
+    """Same for absences: our name, or the row is not this match's."""
+    alignment = TeamAlignment.build(fixture, [row.team for row in rows])
+    placed: list[AbsenceRow] = []
+    for row in rows:
+        team = alignment.rename(row.team)
+        if team not in (fixture.home, fixture.away):
+            continue
+        note = alignment.note_for(team)
+        placed.append(
+            replace(
+                row,
+                team=team,
+                source=f"API-Football ({note})" if note else row.source,
+            )
+        )
+    return tuple(placed)
+
+
+def _align_statistics(
+    rows: Sequence[MatchStatistics], fixture: Fixture
+) -> tuple[MatchStatistics, ...]:
+    """Same for statistics, and ``home`` is decided by the fixture, not a string."""
+    alignment = TeamAlignment.build(fixture, [row.team for row in rows])
+    placed: list[MatchStatistics] = []
+    for row in rows:
+        team = alignment.rename(row.team)
+        if team not in (fixture.home, fixture.away):
+            continue
+        opponent = fixture.away if team == fixture.home else fixture.home
+        placed.append(
+            replace(row, team=team, opponent=opponent, home=team == fixture.home)
+        )
+    return tuple(placed)
 
 
 def _first_fixture_id(payload: object) -> int | None:

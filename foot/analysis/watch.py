@@ -239,6 +239,7 @@ def watch_until_kickoff(
             bookmaker=bookmaker,
             quoted_at=priced_at,
             watching=True,
+            live=True,
         )
         attempt = _observe(result, at=current, previous=previous)
         report.attempts.append(attempt)

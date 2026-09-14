@@ -549,6 +549,10 @@ def command_analyser(
         engine,
         matches=text,
         as_of=as_of,
+        # No --date means "analyse now": the collection this run performs is
+        # part of what it may see. A --date is a replay of that instant, and
+        # stays strictly there.
+        live=not args.date,
         timezone=args.fuseau,
         bookmaker=args.bookmaker,
         files={

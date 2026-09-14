@@ -135,11 +135,16 @@ def run_journey(
     files: Mapping[str, str | Path | None] | None = None,
     supplements: SupplementSet | None = None,
     watching: bool = False,
+    live: bool = False,
 ) -> JourneyResult:
     """Run one request end to end — the single path both surfaces take.
 
     ``quoted_at`` dates only the prices **typed on the match line**; a price a
     provider imported keeps the hour it was actually observed.
+
+    ``live`` says whether ``as_of`` is "now" or a date being replayed. Both
+    surfaces compute an instant before calling, so neither can be told apart by
+    its absence — they must say which they mean.
     """
     context = supplements
     if context is None:
@@ -152,6 +157,7 @@ def run_journey(
         quoted_at=quoted_at if quoted_at is not None else as_of,
         supplements=context,
         watching=watching,
+        live=live,
     )
     # Count what the engine could actually see at `as_of`, not what the file
     # contained: a line published after the analysis is read, reported, and not

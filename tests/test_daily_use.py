@@ -26,7 +26,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -73,11 +73,14 @@ class SheetSource:
         self,
         *,
         publishes_at: dt.datetime | None,
-        clock: Sequence[dt.datetime] | None = None,
+        clock: Callable[[], dt.datetime] | None = None,
         players: int = 11,
     ) -> None:
         self._publishes_at = publishes_at
-        self._clock = list(clock or [])
+        # A callable, not a list indexed by call count: a double that guesses
+        # the time from how often it was asked tests its own bookkeeping. With
+        # no clock it publishes unconditionally, which is what most callers want.
+        self._clock = clock
         self._players = players
         self.calls = 0
 
@@ -93,7 +96,7 @@ class SheetSource:
         self, fixture: Fixture
     ) -> tuple[tuple[LineupRow, ...], tuple[Evidence, ...]]:
         self.calls += 1
-        now = self._clock[min(self.calls - 1, len(self._clock) - 1)] if self._clock else None
+        now = self._clock() if self._clock is not None else None
         published = self._publishes_at
         if published is None or (now is not None and now < published):
             return ((), ())
@@ -139,19 +142,22 @@ def _engine(*extra: object) -> Engine:
 def test_the_watch_retries_until_the_sheet_is_published() -> None:
     """Une feuille absente à T−75 doit être retrouvée quelques minutes plus tard."""
     published = KICKOFF - dt.timedelta(minutes=52)
-    source = SheetSource(publishes_at=published)
     plan = WatchPlan(kickoff=KICKOFF, retry_every=dt.timedelta(minutes=5))
-    ticks = iter(plan.due_times())
     current = {"now": plan.due_times()[0]}
 
     def clock() -> dt.datetime:
         return current["now"]
 
-    def sleep(_seconds: float) -> None:
-        current["now"] = next(ticks, KICKOFF)
+    # The double reads the same clock as the loop, so « not published yet » is
+    # really about the hour and not about how many times it has been called.
+    source = SheetSource(publishes_at=published, clock=clock)
 
-    # The first tick is consumed by the initial position of the clock.
-    next(ticks)
+    def sleep(seconds: float) -> None:
+        # Advance by what was actually asked for, capped like the real sleeper.
+        # A clock that jumps one due time per call tests the test's bookkeeping
+        # rather than the loop's.
+        current["now"] += dt.timedelta(seconds=max(0.0, min(seconds, 3600.0)))
+
     report = watch_until_kickoff(
         _engine(source),
         matches=_LINE,
