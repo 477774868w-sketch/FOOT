@@ -604,7 +604,7 @@ parcours normal.
 | Décision, confiance, risque principal, condition d'annulation | `R22` ✓ |
 | **Contrôle T−75/T−60 exécuté**, avec nouvelles tentatives jusqu'au coup d'envoi | `foot suivre` ; `tests/test_daily_use.py` (6 tests) |
 | **Journal des prévisions** en ajout seul, révision distinguée d'une reconduction | `foot journal` ; `tests/test_daily_use.py` (6 tests) |
-| **Mesure du journal** : RPS, calibration, skill, rendement réglé au catalogue | `foot mesurer` ; §12, mesuré sur 110 rencontres réelles |
+| **Mesure du journal** : RPS, calibration, références et intervalle | `foot mesurer` ; §12–13, mesuré sur 80 rencontres réelles disjointes |
 | **Accès privé + HTTPS + sauvegarde côté serveur** | `foot web --jeton --certificat --cle --journal` ; 5 tests sur serveur réel |
 | Restitution de **chaque ligne saisie**, ambiguïtés nommées avec la façon de trancher | « Contrôle : chaque ligne saisie apparaît bien ci-dessus. » |
 
@@ -769,45 +769,74 @@ Remboursements et quarts de ligne sont donc traités exactement comme l'espéran
 d'avant-match le supposait — un test le vérifie sur quatre règlements distincts
 (gain, perte, remboursement, demi-perte).
 
-### 12.2 Mesure réelle sur 110 rencontres
+### 12.2 Mesure sur un rejeu rétrospectif — et une affirmation corrigée
 
-Rejeu chronologique sur données réelles : historique arrêté au **1er avril
-2026**, prévisions écrites au journal à cette date pour les 110 rencontres
-d'Angleterre, d'Espagne et d'Italie jouées dans les quatre semaines suivantes,
-puis appariement aux résultats réels.
+**Ce qui suit est un rejeu, pas un carnet tenu en avril.** L'historique est
+arrêté au 1er avril 2026 et les prévisions sont calculées comme si l'on était à
+cette date, mais elles ont été **écrites aujourd'hui**. Le journal le sait : une
+ligne dont `recorded_at` est postérieur à son coup d'envoi est marquée
+rétrospective et **exclue du bilan par défaut**. Il faut `--avec-rejeux` pour
+l'inclure, et le rapport le dit.
+
+**L'affirmation de non-recouvrement du §12.2 précédent était fausse.** Vérifiée
+par intersection plutôt qu'asserée : sur les 110 rencontres, **30 étaient dans
+l'échantillon de test de la validation chronologique du §8.5** — toutes les
+anglaises, puisque cette validation porte sur `en.1`. La mesure est donc reprise
+sur les **80 rencontres réellement disjointes** (Espagne et Italie),
+intersection vérifiée **nulle**.
+
+Les identifiants des trois échantillons sont publiés dans
+[`protocole/echantillons-de-mesure.json`](protocole/echantillons-de-mesure.json)
+(`competition|date|domicile|exterieur`), avec les intersections calculées :
+
+| Échantillon | Effectif | ∩ validation §8.5 |
+|---|---|---|
+| Rejeu avril 2026, complet | 110 | **30** |
+| Rejeu avril 2026, disjoint (es.1 + it.1) | 80 | **0** |
+| Validation chronologique §8.5 | 486 | — |
 
 ```
-Mesure de 110 rencontre(s) résolue(s), 0 en attente
-  journal          n=110    RPS=0.21032  Brier=0.60458  logloss=1.01249  acc= 57.3%
-  taux de base     n=110    RPS=0.22583  Brier=0.63686  logloss=1.05588  acc= 47.3%
-  skill sur le RPS contre le taux de base de l'échantillon : +6.87%
+Mesure de 80 rencontre(s) résolue(s), 0 en attente
+  journal                n=80   RPS=0.20551  Brier=0.60361  logloss=1.00940  acc=56.2%
+  référence descriptive  n=80   RPS=0.22148  ← calculée APRÈS COUP
+  référence antérieure   n=80   RPS=0.22328  ← estimée sur les seules données antérieures
+  skill contre la référence descriptive : +7.21% — majorant optimiste
+  skill contre la référence antérieure  : +7.96%
+  écart de RPS modèle − référence descriptive :
+      IC 95% [-0.04789, +0.01594] sur n=80 (négatif = le modèle fait mieux)
 
-  calibration over 110 forecast-outcome pairs (ECE = 0.0512, MCE = 0.1736)
-    [0.00, 0.20)  n=39     claimed=0.142  observed=0.205  bias=-0.064
-    [0.20, 0.40)  n=203    claimed=0.284  observed=0.251  bias=+0.033
-    [0.40, 0.60)  n=70     claimed=0.489  observed=0.571  bias=-0.083
-    [0.60, 0.80)  n=17     claimed=0.696  observed=0.588  bias=+0.107
-    [0.80, 1.00)  n=1      claimed=0.826  observed=1.000  bias=-0.174
+  calibration over 80 forecast-outcome pairs (ECE = 0.0571, MCE = 0.1662)
+    [0.00, 0.20)  n=33   claimed=0.140  observed=0.212  bias=-0.072
+    [0.20, 0.40)  n=140  claimed=0.279  observed=0.243  bias=+0.036
+    [0.40, 0.60)  n=52   claimed=0.494  observed=0.577  bias=-0.083
+    [0.60, 0.80)  n=14   claimed=0.702  observed=0.571  bias=+0.130
+    [0.80, 1.00)  n=1    claimed=0.834  observed=1.000  bias=-0.166
 
-  Aucun marché réglable n'a été retenu sur ces rencontres : aucun rendement
-  n'est calculé.
-  Cotes de clôture : aucune source n'en a servi pour ces rencontres —
-  l'écart au prix de clôture reste non mesuré.
+  AVANTAGE NON DÉMONTRÉ sur cet échantillon : l'intervalle de confiance de
+  l'écart de RPS contient zéro ([-0.04789, +0.01594], n=80). Le skill positif
+  ci-dessus est une estimation ponctuelle, pas une performance établie.
+  Aucune rentabilité n'est promise.
 ```
 
-Ce que ce tableau dit, et ce qu'il ne dit pas :
+**C'est le résultat, et il est négatif quant à la démonstration.** Un skill de
++7,2 % sur 80 rencontres a un intervalle de confiance qui contient zéro : le
+modèle n'y démontre aucun avantage. Ni 30 rencontres, ni 80, ni un nombre de
+tests ne suffisent à établir une fiabilité prédictive, et le rapport refuse
+désormais de conclure quand l'intervalle traverse zéro — quel que soit
+l'effectif.
 
-* **+6,87 % de skill** sur un échantillon **disjoint** de celui du §8.5 (+8,24 %
-  sur la Premier League), ce qui est cohérent sans être une confirmation
-  indépendante : c'est le même modèle sur le même genre de données ;
-* la calibration est **honnête mais imparfaite** : le modèle sous-estime
-  légèrement les favoris à 40-60 % et surestime ceux à 60-80 %. Le dernier
-  intervalle contient **une seule** paire — il ne dit rien, et le rapport
-  l'affiche avec son `n=1` plutôt que de le masquer ;
-* **aucun rendement n'est calculé**, parce qu'aucun prix n'était disponible sur
-  ces rencontres d'archive. C'est le résultat correct : inventer des cotes pour
-  produire un pourcentage aurait été exactement le défaut que tout ce travail
-  cherche à éviter.
+Deux références sont affichées, parce qu'elles ne disent pas la même chose :
+
+* la **descriptive** utilise les fréquences de l'échantillon évalué. Elle connaît
+  le résultat des rencontres qu'elle sert à juger, donc le skill mesuré contre
+  elle est un **majorant optimiste**, pas une performance ;
+* l'**antérieure** est estimée sur les seules rencontres jouées **avant** le
+  début de l'échantillon. Elle aurait pu être alignée le jour même, ce qui est
+  la seule chose qu'un adversaire de référence doive pouvoir faire.
+
+Aucun rendement n'est calculé : aucun prix n'était disponible sur ces rencontres
+d'archive. Inventer des cotes pour produire un pourcentage aurait été exactement
+le défaut que ce travail cherche à éviter.
 
 ### 12.3 Deux corrections rendues nécessaires par la mesure
 
@@ -825,6 +854,8 @@ plante sur un petit journal est un rapport qu'on ne lit jamais.
 
 ### 12.4 Le plancher de conclusion
 
+Deux garde-fous, et le second compte davantage :
+
 En dessous de **30 rencontres résolues**, les chiffres sont affichés — les
 masquer serait une autre forme de malhonnêteté — mais aucune conclusion n'est
 énoncée :
@@ -834,3 +865,7 @@ masquer serait une autre forme de malhonnêteté — mais aucune conclusion n'es
   parce qu'ils existent, pas parce qu'ils démontrent quoi que ce soit — un
   rendement calculé sur si peu de paris est du bruit.
 ```
+
+Et quel que soit l'effectif, **un intervalle de confiance qui contient zéro
+interdit d'annoncer un avantage**. C'est le cas sur les 80 rencontres du §12.2 :
+l'effectif suffit au premier garde-fou, et le second l'arrête quand même.

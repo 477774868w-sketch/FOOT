@@ -835,15 +835,24 @@ def command_mesurer(args: argparse.Namespace) -> int:
                 print(f"  {competition} {season} : {error}", file=sys.stderr)
                 continue
             played.extend(data.played)
+    # Everything played before the earliest forecast in the journal: a reference
+    # estimated on that could actually have been fielded on the day, unlike the
+    # sample's own frequencies.
+    earliest = min((f.as_of.date() for f in forecasts), default=None)
+    prior = (
+        [m for m in played if m.date < earliest] if earliest is not None else []
+    )
     closing = _closing_prices(args, registry, competitions)
     print(_heading("MESURE DES PRÉVISIONS ENREGISTRÉES"))
     print(f"  journal    : {book.path} ({len(forecasts)} ligne(s))")
     print(f"  résultats  : {len(played)} match(s) joués, {', '.join(competitions)}")
+    print(f"  antérieurs : {len(prior)} match(s) pour la référence estimée d'avance")
     print(f"  clôture    : {closing.render()}")
     print()
     report = measure(
         book,
         results=played,
+        prior=prior,
         closing=closing,
         as_of=_moment(getattr(args, "date", None), args),
         include_retrospective=bool(getattr(args, "avec_rejeux", False)),

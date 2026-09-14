@@ -519,3 +519,85 @@ def test_g9c_a_missing_closing_file_is_unreachable_not_absent() -> None:
     prices = load_closing_csv(Path(tempfile.mkdtemp()) / "absent.csv")
     assert prices.state is ClosingState.UNREACHABLE
     assert "introuvable" in prices.detail
+
+
+# --------------------------------------------------------------------------- #
+# 10. Qualification des performances
+# --------------------------------------------------------------------------- #
+
+
+def test_g10_the_in_sample_reference_is_labelled_as_computed_afterwards() -> None:
+    """Elle connaît le résultat des rencontres qu'elle sert à juger."""
+    book = _book(
+        *(_forecast(f"Club {i}", f"Adversaire {i}") for i in range(12))
+    )
+    results = [
+        _played(f"Club {i}", f"Adversaire {i}", (2, 0) if i % 2 else (0, 1))
+        for i in range(12)
+    ]
+    report = measure(book, results=results)
+    rendered = report.render()
+    assert "descriptive, calculée APRÈS COUP" in rendered
+    assert "majorant optimiste, à ne pas citer comme performance" in rendered
+    assert report.prior_baseline is None
+    assert "aucune référence antérieure fournie" in rendered
+
+
+def test_g10b_a_reference_estimated_on_earlier_data_only_is_offered() -> None:
+    book = _book(
+        *(_forecast(f"Club {i}", f"Adversaire {i}") for i in range(12))
+    )
+    results = [
+        _played(f"Club {i}", f"Adversaire {i}", (2, 0) if i % 2 else (0, 1))
+        for i in range(12)
+    ]
+    prior = [_played(f"Vieux {i}", "Ancien", (1, 1), day=1) for i in range(20)]
+    report = measure(book, results=results, prior=prior)
+    assert report.prior_baseline is not None
+    assert "estimée sur les seules données antérieures" in report.render()
+    assert report.prior_baseline.name != report.baseline.name  # type: ignore[union-attr]
+
+
+def test_g10c_an_interval_spanning_zero_forbids_claiming_an_advantage() -> None:
+    """Ni 30 rencontres ni un nombre de tests ne démontrent une fiabilité."""
+    # Forty distinct fixtures, all on the same day: different clubs, so the
+    # identity is distinct and the calendar stays valid.
+    book = _book(
+        *(
+            _forecast(
+                f"Club {i}",
+                f"Adversaire {i}",
+                probabilities=(0.34, 0.33, 0.33),
+            )
+            for i in range(40)
+        )
+    )
+    results = [
+        _played(f"Club {i}", f"Adversaire {i}", [(2, 0), (1, 1), (0, 2)][i % 3])
+        for i in range(40)
+    ]
+    report = measure(book, results=results)
+    interval = report.rps_interval()
+    assert interval is not None and interval[0] < 0.0 < interval[1]
+    rendered = report.render()
+    assert "AVANTAGE NON DÉMONTRÉ" in rendered
+    assert "Aucune rentabilité n'est promise" in rendered
+    assert report.conclusive, "l'effectif suffit ; c'est l'intervalle qui ne suit pas"
+
+
+def test_g10d_a_replay_is_reported_as_retrospective_not_as_a_forecast() -> None:
+    """« Prévisions enregistrées en avril » n'est pas ce qu'est un rejeu."""
+    kickoff = dt.datetime(2026, 4, 12, 20, 45, tzinfo=UTC)
+    replay = dataclasses.replace(
+        _forecast("Club A", "Club B", date="2026-04-12", fingerprint="rejeu"),
+        as_of=dt.datetime(2026, 4, 1, 8, tzinfo=UTC),
+        recorded_at=dt.datetime(2026, 9, 14, 1, tzinfo=UTC),
+        kickoff_at=kickoff.isoformat(),
+    )
+    assert replay.retrospective, "écrit cinq mois après le coup d'envoi"
+    results = [_played("Club A", "Club B", (1, 0), day=12)]
+    results[0] = dataclasses.replace(results[0], date=dt.date(2026, 4, 12))
+    default = measure(_book(replay), results=results)
+    assert not default.resolved and len(default.excluded) == 1
+    asked = measure(_book(replay), results=results, include_retrospective=True)
+    assert len(asked.resolved) == 1

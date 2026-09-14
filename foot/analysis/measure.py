@@ -38,7 +38,7 @@ from foot.analysis.naming import normalise
 from foot.analysis.quotes import offer_for_key
 from foot.domain import Match, Outcome, OutcomeProbabilities, Score
 from foot.evaluation.calibration import CalibrationReport, calibration_report
-from foot.evaluation.metrics import ScoreCard
+from foot.evaluation.metrics import ScoreCard, ranked_probability_score
 from foot.markets.catalogue import MarketOffer
 from foot.markets.settlement import unit_return
 
@@ -51,6 +51,9 @@ __all__ = [
     "closing_key",
     "measure",
 ]
+
+_MIN_FOR_INTERVAL = 10
+"""Below this, an interval on a mean is decoration rather than information."""
 
 MIN_TO_CONCLUDE = 30
 """Resolved matches below which no conclusion is stated, only figures.
@@ -184,6 +187,21 @@ class Measurement:
 
     scorecard: ScoreCard | None = None
     baseline: ScoreCard | None = None
+    """**Descriptive** reference: the sample's own outcome frequencies.
+
+    Computed after the fact from the very matches being scored, so it knows
+    things no forecaster could have known. It says how hard the sample was; it
+    is not a rival anybody could have fielded, and quoting a skill score against
+    it as "performance" would flatter the model.
+    """
+
+    prior_baseline: ScoreCard | None = None
+    """Reference estimated from **earlier data only** — a real rival.
+
+    Built from matches played before the sample begins, so it could actually
+    have been fielded on the day. ``None`` when no prior history was supplied,
+    and then nothing is claimed.
+    """
     calibration: CalibrationReport | None = None
     revised: int = 0
     """Matches whose forecast was revised at least once before kick-off."""
@@ -204,6 +222,27 @@ class Measurement:
         if not values:
             return None
         return math.fsum(values) / len(values)
+
+    def rps_interval(self) -> tuple[float, float] | None:
+        """95% interval on the *paired* RPS difference, model minus reference.
+
+        Paired because both forecasters see the same matches: the variance that
+        matters is the variance of the difference, not of either score. Without
+        it a skill score is a point estimate with no scale, and a reader has no
+        way to tell +6.9% on 110 matches from +6.9% on 11 000.
+        """
+        if len(self.resolved) < _MIN_FOR_INTERVAL:
+            return None
+        pairs = [
+            ranked_probability_score(r.probabilities, r.outcome)
+            - ranked_probability_score(_base_rate([x.outcome for x in self.resolved]), r.outcome)
+            for r in self.resolved
+        ]
+        n = len(pairs)
+        mean = math.fsum(pairs) / n
+        variance = math.fsum((x - mean) ** 2 for x in pairs) / (n - 1)
+        half = 1.96 * math.sqrt(variance / n)
+        return (mean - half, mean + half)
 
     def mean_closing_edge(self) -> float | None:
         edges = [r.closing_edge() for r in self.resolved]
@@ -238,13 +277,37 @@ class Measurement:
         if self.scorecard is not None:
             lines.append(f"  {self.scorecard}")
         if self.baseline is not None and self.scorecard is not None:
-            lines.append(f"  {self.baseline}")
+            lines.append(f"  {self.baseline}  ← descriptive, calculée APRÈS COUP")
+            if self.prior_baseline is not None:
+                lines.append(
+                    f"  {self.prior_baseline}  ← estimée sur les seules données "
+                    f"antérieures"
+                )
+            else:
+                lines.append(
+                    "  aucune référence antérieure fournie : seule la référence "
+                    "descriptive est disponible, et elle connaît le résultat des "
+                    "rencontres qu'elle sert à juger"
+                )
             if self.baseline.rps > 0.0:
                 skill = self.scorecard.skill_against(self.baseline)
                 lines.append(
-                    f"  skill sur le RPS contre le taux de base de l'échantillon : "
-                    f"{skill * 100:+.2f}%"
+                    f"  skill contre la référence descriptive : {skill * 100:+.2f}% "
+                    f"— majorant optimiste, à ne pas citer comme performance"
                 )
+                if self.prior_baseline is not None and self.prior_baseline.rps > 0.0:
+                    honest = self.scorecard.skill_against(self.prior_baseline)
+                    lines.append(
+                        f"  skill contre la référence antérieure : {honest * 100:+.2f}%"
+                    )
+                interval = self.rps_interval()
+                if interval is not None:
+                    low, high = interval
+                    lines.append(
+                        f"  écart de RPS modèle − référence descriptive : "
+                        f"IC 95% [{low:+.5f}, {high:+.5f}] sur n={len(self.resolved)} "
+                        f"(négatif = le modèle fait mieux)"
+                    )
             else:
                 # Every match in the sample ended the same way, so the sample's
                 # own frequencies are a perfect forecaster and the ratio is
@@ -289,11 +352,24 @@ class Measurement:
             )
 
         lines.append("")
-        if self.conclusive:
+        interval = self.rps_interval()
+        if interval is not None and interval[0] < 0.0 < interval[1]:
+            # The number of matches is not the question. An interval that spans
+            # zero means the advantage is not distinguishable from none — and a
+            # skill score quoted without that is a claim the data does not carry.
             lines.append(
-                f"  Échantillon de {len(self.resolved)} rencontres : les chiffres "
-                f"ci-dessus sont interprétables, avec la prudence due à un "
-                f"échantillon de cette taille."
+                f"  AVANTAGE NON DÉMONTRÉ sur cet échantillon : l'intervalle de "
+                f"confiance de l'écart de RPS contient zéro "
+                f"([{interval[0]:+.5f}, {interval[1]:+.5f}], n={len(self.resolved)}). "
+                f"Le skill positif ci-dessus est une estimation ponctuelle, pas "
+                f"une performance établie. Aucune rentabilité n'est promise."
+            )
+        elif self.conclusive:
+            lines.append(
+                f"  Échantillon de {len(self.resolved)} rencontres, écart de RPS "
+                f"dont l'intervalle exclut zéro : le résultat est interprétable, "
+                f"avec la prudence due à un échantillon de cette taille. Il ne "
+                f"constitue aucune promesse de rentabilité."
             )
         else:
             lines.append(
@@ -313,6 +389,7 @@ def measure(
     book: ForecastBook,
     *,
     results: Sequence[Match],
+    prior: Sequence[Match] = (),
     closing: ClosingPrices | None = None,
     as_of: dt.datetime | None = None,
     include_retrospective: bool = False,
@@ -335,6 +412,8 @@ def measure(
 
     Args:
         results: played matches, from whatever source already loaded them.
+        prior: matches played **before** the sample, used to estimate a
+            reference that could genuinely have been fielded on the day.
         closing: closing prices **and the reason when there are none** — not
             wired, unreachable, or served but silent on this fixture.
         as_of: report cut-off. A forecast recorded after it is excluded — asking
@@ -398,15 +477,24 @@ def measure(
     resolved, duplicates = _one_per_fixture(resolved)
     excluded.extend(duplicates)
 
-    scorecard = baseline = None
+    scorecard = baseline = prior_baseline = None
     calibration = None
     if resolved:
         forecasts = [r.probabilities for r in resolved]
         outcomes = [r.outcome for r in resolved]
         scorecard = ScoreCard.evaluate(forecasts, outcomes, name="journal")
         baseline = ScoreCard.evaluate(
-            [_base_rate(outcomes)] * len(outcomes), outcomes, name="taux de base"
+            [_base_rate(outcomes)] * len(outcomes),
+            outcomes,
+            name="référence descriptive",
         )
+        earlier = [m.score.outcome for m in prior if m.score is not None]
+        if len(earlier) >= _MIN_FOR_INTERVAL:
+            prior_baseline = ScoreCard.evaluate(
+                [_base_rate(earlier)] * len(outcomes),
+                outcomes,
+                name="référence antérieure",
+            )
         calibration = calibration_report(forecasts, outcomes, bins=5)
     return Measurement(
         resolved=tuple(resolved),
@@ -414,6 +502,7 @@ def measure(
         excluded=tuple(excluded),
         scorecard=scorecard,
         baseline=baseline,
+        prior_baseline=prior_baseline,
         calibration=calibration,
         revised=sum(1 for count in revisions.values() if count),
         closing=prices,
