@@ -879,6 +879,11 @@ class Engine:
         extra, collected = self._collect_context(fixture, extra, history, as_of)
         evidence.extend(collected)
         gathered = _collection_summary(before, extra, self._collector_names())
+        # Which families the collection actually filled — read from the counts,
+        # not from a row's ``source`` column. That column names the *upstream*
+        # an operator cites when pasting ("Understat"), so reading it would call
+        # a hand-typed line automatic.
+        automatic = _filled_families(before, extra, self._collector_names())
         # One input, cut once. Everything downstream — estimate, findings,
         # scenarios, lineup check, decision — reads `sport_input`, never the
         # raw history or the raw supplements, so none of them can see further
@@ -992,6 +997,7 @@ class Engine:
             fixture,
             [*dossier.findings, *market_findings],
             known_extra,
+            collected_families=automatic,
         )
         decision = select_best(
             priced,
@@ -1261,8 +1267,15 @@ class Engine:
         fixture: Fixture,
         findings: Sequence[Finding],
         supplements: SupplementSet | None = None,
+        collected_families: frozenset[str] = frozenset(),
     ) -> list[RubricAssessment]:
-        """Answer each rubric with its data, its treatment and its real effect."""
+        """Answer each rubric with its data, its treatment and its real effect.
+
+        Args:
+            collected_families: context families a provider fetched. It decides
+                whether an answered rubric reads « opérationnel » or « fournie
+                par l'opérateur » — a distinction the report must not guess.
+        """
         supplied = _supplied_counts(supplements or SupplementSet())
         available = frozenset(
             c for s in report.statuses if s.usable for c in s.capabilities
@@ -1286,9 +1299,20 @@ class Engine:
             )
             covered = by_rubric.get(rubric.number, [])
             gap = rubric.requires - available
-            # A rubric the operator supplied data for is answered, not blocked.
+            # A rubric answered by data is answered, not blocked — and *who*
+            # answered it matters: « fournie par l'opérateur » about a line a
+            # provider fetched would misattribute the work, and hide that a key
+            # is doing something.
             if gap and covered:
-                implementation = RubricImplementation.OPERATOR_SUPPLIED
+                fetched = _FAMILY_BY_CAPABILITY.keys() & rubric.requires
+                implementation = (
+                    RubricImplementation.OPERATIONAL
+                    if any(
+                        _FAMILY_BY_CAPABILITY[capability] in collected_families
+                        for capability in fetched
+                    )
+                    else RubricImplementation.OPERATOR_SUPPLIED
+                )
                 gap = frozenset()
             if gap:
                 # An operator who has just pasted a file must be told why it was
@@ -2124,3 +2148,24 @@ def _collection_summary(
             return ()
         return (f"aucune donnée collectée par {', '.join(sources)}",)
     return (f"{', '.join(parts)} — collectées par {', '.join(sources)}",)
+
+
+_FAMILY_BY_CAPABILITY: Mapping[Capability, str] = {
+    Capability.ADVANCED_STATS: "xg",
+    Capability.INJURIES: "absences",
+    Capability.LINEUPS: "lineups",
+}
+
+
+def _filled_families(
+    before: tuple[int, int, int], after: SupplementSet, sources: Sequence[str]
+) -> frozenset[str]:
+    """Which context families a provider — not the operator — supplied rows for."""
+    if not sources:
+        return frozenset()
+    grown = {
+        "xg": len(after.xg) - before[0],
+        "absences": len(after.absences) - before[1],
+        "lineups": len(after.lineups) - before[2],
+    }
+    return frozenset(name for name, count in grown.items() if count > 0)

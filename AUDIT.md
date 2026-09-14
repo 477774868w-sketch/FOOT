@@ -1058,3 +1058,137 @@ ruff check .                 propre
 mypy .                       propre, 100 fichiers
 protocole synchronisé        protocole/protocole-22-rubriques.json == dump_rubrics()
 ```
+
+
+---
+
+## 15. Septième revue du commit `a53070b` — le raccordement manquant
+
+### 15.1 Le point central : les xG et les absences n'étaient appelés par personne
+
+`ApiFootballProvider.absences()` et `xg_rows()` existaient ; **rien ne les
+appelait**. `Engine._analyse_one` ne passait que par `_collect_sheets`. Ajouter
+le fournisseur au registre apportait donc les compositions et rien d'autre : une
+clé changeait moins qu'il n'y paraissait.
+
+`_collect_context` remplace `_collect_sheets` : trois familles, trois protocoles
+(`LineupSource`, `AbsenceSource`, `XgSource`), **une seule porte**, appelée avant
+`build_sport_input` et avant le scellement. Tout ce qui est collecté traverse
+ensuite `available_at` comme une donnée collée à la main — une source automatique
+ne voit jamais plus loin dans le futur qu'un opérateur.
+
+Les xG portent sur les **rencontres passées** des deux équipes, jamais sur le
+match à venir : ses statistiques n'existent pas. Le moteur choisit les rencontres
+— il tient l'historique et la coupure — et le fournisseur ne fait que chercher,
+ce qui met aussi le quota sous le contrôle de l'appelant
+(`RECENT_MATCHES_PER_TEAM = 5` par équipe).
+
+### 15.2 La preuve de bout en bout
+
+Le vrai parcours, sans le moindre CSV, avec le véritable adaptateur sur réponses
+simulées :
+
+```
+1. RÉPONSE API — points d'accès réellement appelés
+    13 × /fixtures            10 × /fixtures/statistics
+     1 × /injuries             1 × /fixtures/lineups
+
+2. CONTEXTE RETENU
+   10 ligne(s) xG, 1 absence(s) — collectées par API-Football
+
+3. DOSSIER SPORTIF SCELLÉ
+   empreinte : 1e81c6c4cb420cdb
+   familles de preuves : absence, résultats, stats, xg
+     stats::Club A::2025-12-05   [confirmé] relevé 13/09 12:00
+
+4. CONSTATS ET SCÉNARIOS
+   [fait · R07] Club A : 13 buts pour 9.90 xG sur 6 match(s) (ratio 1.22)
+   [fait · R11] Club A : 1 absence(s), dont 1 à un poste décisif (Gardien Titulaire)
+   SCÉNARIO SPORTIF : absences décisives (Club A)
+     fondé sur : absence rapportée — fait DOCUMENTÉ et sourcé
+     cite      : absence::Club A::Gardien Titulaire
+
+5. RAPPORT
+   R07 partielle    opérationnel      R11 traitée       opérationnel
+   R10 indisponible développé…        R21 indisponible  développé…
+```
+
+R10 et R21 restent indisponibles parce que la réponse de compositions est vide —
+la feuille n'est pas publiée. C'est le bon résultat, pas un échec du
+raccordement.
+
+`tests/test_regression_review7.py` vérifie chacun de ces cinq maillons, plus
+l'exclusion d'une absence publiée après l'analyse, et l'égalité des empreintes
+entre terminal et navigateur. **Aucune recommandation n'est forcée** : ce qui est
+prouvé, c'est quelles données ont réellement servi.
+
+### 15.3 Deux défauts trouvés en écrivant cette preuve
+
+**Une donnée collectée était créditée à l'opérateur.** La rubrique répondue par
+une source automatique s'affichait « fournie par l'opérateur ». Premier essai de
+correction : lire la colonne `source` de la ligne — faux, car cette colonne nomme
+l'**amont** qu'un opérateur cite en collant (« Understat »), et un collage
+serait alors compté comme automatique. La provenance est donc déduite du
+**décompte** : ce que la collecte a ajouté, et rien d'autre.
+
+**Une ligne indisponible portait encore une valeur.** `XgRow.evidence`,
+`AbsenceRow.evidence` et `LineupRow.evidence` construisaient une `Evidence`
+`UNAVAILABLE` avec un texte, ce que le registre refuse — une `ValueError` au
+milieu d'une analyse. Même règle que partout ailleurs : un fait indisponible ne
+porte aucune valeur.
+
+**Et un troisième, dans le test lui-même :** `_recent_fixtures` étiquetait les
+rencontres passées avec la compétition portée par chaque ligne d'historique, qui
+peut être un libellé d'affichage que rien ne cartographie. C'est la clé résolue
+par le moteur qui vaut — c'est sous elle que l'historique a été chargé.
+
+### 15.4 Saisons : une seule résolution
+
+`_fixture_id()` prenait `fixture.date.year`, `coverage()` l'année de début. Un
+match de **février 2026 appartient à 2025-26** : le chercher en saison 2026 ne le
+trouvait jamais, et la donnée n'arrivait simplement pas. `season_of(date)` et
+`season_year("2025-26")` partagent désormais la même règle, exercée de part et
+d'autre du changement d'année.
+
+### 15.5 `foot couverture`, complété
+
+Trois familles sondées **séparément** — statistiques, absences, compositions —
+parce qu'un plan peut servir l'une et refuser l'autre. Chaque verdict nomme la
+rencontre dont il est tiré, et le tableau écrit que **c'est un sondage, pas un
+inventaire**.
+
+Quand le tableau est vide, le vrai motif est conservé : quota épuisé, clé
+refusée, saison inaccessible ou vide, compétition non cartographiée, ou clé
+absente. Cinq situations, cinq messages — afficher « sans clé » alors qu'une clé
+est posée envoie chercher un faux problème.
+
+### 15.6 Les tests hors réseau le sont réellement
+
+`test_no_key_ever_reaches_a_report` construisait le fournisseur **sans doublure**
+et appelait `probe()` : il envoyait une clé factice au vrai service.
+
+Un garde-fou refuse maintenant toute sortie réseau hors des tests marqués
+`network`, dans `conftest.py` **et** dans le lanceur sans dépendance. Le contrôle
+par adresse ne suffisait pas : le mandataire de cette machine écoute sur
+`127.0.0.1` et relaie vers l'extérieur, si bien qu'un filtre d'adresse laissait
+tout passer. Le verrou est donc posé à la frontière HTTP, avec un second verrou
+socket pour ce qui n'emprunterait pas `urllib`. La boucle locale reste ouverte :
+plusieurs tests lancent un vrai serveur sur `127.0.0.1`.
+
+### 15.7 Vérifications
+
+```
+pytest -m "not network"      444 réussis, 1 ignoré
+python3 tests/run_tests.py --sans-reseau
+                             444 réussi(s), 0 échec(s), 1 ignoré(s) sur 445
+ruff check .                 propre
+mypy .                       propre, 101 fichiers
+protocole synchronisé        protocole/protocole-22-rubriques.json == dump_rubrics()
+```
+
+### 15.8 Ce qu'il reste avant de dire qu'une clé suffit
+
+Le raccordement est fait et prouvé **sur réponses simulées**. Ce qu'une clé
+gratuite dira encore — et que personne ne peut affirmer d'ici — c'est quels
+champs le plan sert réellement : `foot couverture` est là pour le mesurer champ
+par champ, championnat par championnat, avant toute dépense.

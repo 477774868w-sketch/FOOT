@@ -30,6 +30,7 @@ from foot.analysis.journey import run_journey
 from foot.cli import build_parser, command_analyser
 from foot.collect.apifootball import ApiFootballProvider, season_of
 from foot.collect.registry import Registry
+from foot.collect.supplements import supplements_from_text
 from foot.domain import Fixture
 from foot.report.card import render_rubric_provenance
 from foot.report.web import analyse_form
@@ -368,3 +369,45 @@ def test_i5b_the_journey_records_what_the_collection_actually_supplied() -> None
     assert "Contexte retenu" in context or result.used, (
         "ce qui a servi doit être énuméré, pas supposé"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 6. Qui a fourni la donnée
+# --------------------------------------------------------------------------- #
+
+
+def test_i6_collected_data_is_not_credited_to_the_operator() -> None:
+    """« Fournie par l'opérateur » à propos d'une ligne récupérée fausse le compte."""
+    api = _fake()
+    analysis = _engine(api).run(LINE, as_of=AS_OF).analyses[0]
+    states = {
+        a.rubric.number: a.implementation.value
+        for a in analysis.rubrics
+        if a.rubric.number in (7, 11)
+    }
+    assert states[7] == "opérationnel", states
+    assert states[11] == "opérationnel", states
+    assert analysis.collected and "API-Football" in analysis.collected[0]
+
+
+def test_i6b_a_pasted_line_is_still_credited_to_the_operator() -> None:
+    engine = Engine(
+        Registry([StubProvider(_controlled_history(), [
+            Fixture("Club A", "Club B", dt.date(2026, 9, 14), competition="it.1")
+        ])]),
+        config=EngineConfig(seasons=("2026-27",), min_matches=40),
+    )
+    # A row for a match the loaded history actually contains, so the rubric is
+    # genuinely answered — the point being *who* answered it.
+    lines = "date,home,away,home_xg,away_xg\n" + "".join(
+        f"{date:%d/%m/%Y},{home},{away},1.80,0.90\n"
+        for date, played in sorted(_history_pairings().items())[-6:]
+        for home, away in played
+    )
+    run = engine.run(LINE, as_of=AS_OF, supplements=supplements_from_text(xg=lines))
+    analysis = run.analyses[0]
+    seven = next(a for a in analysis.rubrics if a.rubric.number == 7)
+    assert seven.implementation.value.startswith("opérationnel sur données fournies"), (
+        seven.implementation.value
+    )
+    assert analysis.collected == (), "aucune source automatique n'est branchée ici"

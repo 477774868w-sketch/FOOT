@@ -175,7 +175,15 @@ class XgRow(_Timed):
     def evidence(self, retrieved_at: dt.datetime) -> Evidence:
         return Evidence(
             key=self.key,
-            value=f"{self.home_xg:.2f} – {self.away_xg:.2f} xG",
+            # An unavailable fact carries no value — the ledger enforces it, and
+            # a row can reach here marked unavailable (a status read from the
+            # file, a line the availability rule rejected). Passing a number
+            # alongside that status raised instead of reporting.
+            value=(
+                f"{self.home_xg:.2f} – {self.away_xg:.2f} xG"
+                if self.status is not Confidence.UNAVAILABLE
+                else None
+            ),
             source=Source(name=self.source, provider=self.source, official=False),
             retrieved_at=retrieved_at,
             status=self.status,
@@ -265,7 +273,11 @@ class AbsenceRow(_Timed):
     def evidence(self, retrieved_at: dt.datetime) -> Evidence:
         return Evidence(
             key=self.key,
-            value=f"{self.player} ({self.role or 'poste non précisé'})",
+            value=(
+                f"{self.player} ({self.role or 'poste non précisé'})"
+                if self.status is not Confidence.UNAVAILABLE
+                else None
+            ),
             source=Source(
                 name=self.source,
                 provider=self.source,
@@ -336,7 +348,7 @@ class LineupRow(_Timed):
     def evidence(self, retrieved_at: dt.datetime) -> Evidence:
         return Evidence(
             key=self.key,
-            value=self.player,
+            value=self.player if self.status is not Confidence.UNAVAILABLE else None,
             source=Source(
                 name=self.source,
                 provider=self.source,
