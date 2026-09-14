@@ -77,6 +77,14 @@ class Forecast:
     probabilities: tuple[float, float, float]
     expected_goals: tuple[float, float]
     model_version: str
+    kickoff_at: str = ""
+    """ISO instant of kick-off — the boundary a forecast must precede.
+
+    ``as_of`` says when the forecast was made and ``recorded_at`` when it was
+    written; neither says when the match started. Without this, a measurement
+    cannot tell a pre-match forecast from one written afterwards.
+    """
+
     match_date: str = ""
     """ISO date of the fixture — what a later measurement joins on.
 
@@ -146,6 +154,7 @@ class Forecast:
                 "home": self.home,
                 "away": self.away,
                 "kickoff": self.kickoff,
+                "kickoff_at": self.kickoff_at,
                 "match_date": self.match_date,
                 "fingerprint": self.fingerprint,
                 "probabilities": list(self.probabilities),
@@ -178,6 +187,7 @@ class Forecast:
             home=raw["home"],
             away=raw["away"],
             kickoff=raw.get("kickoff", ""),
+            kickoff_at=raw.get("kickoff_at", ""),
             match_date=raw.get("match_date", ""),
             fingerprint=raw.get("fingerprint", ""),
             probabilities=_triple(raw.get("probabilities")),
@@ -198,9 +208,41 @@ class Forecast:
         )
 
     @property
-    def key(self) -> tuple[str, str, str]:
-        """What identifies the *match*, across revisions of its forecast."""
-        return (self.competition, self.home, self.away)
+    def key(self) -> tuple[str, str, str, str]:
+        """What identifies the **fixture**, across revisions of its forecast.
+
+        The date belongs here. Without it, the two matches a pair of clubs play
+        against each other in a season collapsed into one: the second forecast
+        looked like a revision of the first, and only one of the two fixtures
+        was ever measured.
+
+        A journal written before this field existed carries no date; such a line
+        keeps an empty date rather than being assigned one, so old and new lines
+        never merge on a guess.
+        """
+        return (self.competition, self.home, self.away, self.match_date)
+
+    @property
+    def kickoff_instant(self) -> dt.datetime | None:
+        """Kick-off as an instant, when the journal recorded one."""
+        if not self.kickoff_at:
+            return None
+        try:
+            moment = dt.datetime.fromisoformat(self.kickoff_at)
+        except ValueError:
+            return None
+        return moment if moment.tzinfo else moment.replace(tzinfo=dt.timezone.utc)
+
+    @property
+    def retrospective(self) -> bool:
+        """Written **after** the match had already started.
+
+        A replay is a legitimate and useful thing to run, but it is not a
+        forecast anybody stood behind beforehand, and the two must never be
+        averaged together.
+        """
+        kickoff = self.kickoff_instant
+        return kickoff is not None and self.recorded_at >= kickoff
 
 
 class ForecastBook:
@@ -237,7 +279,7 @@ class ForecastBook:
     def __len__(self) -> int:
         return sum(1 for _ in self)
 
-    def latest_for(self, key: tuple[str, str, str]) -> Forecast | None:
+    def latest_for(self, key: tuple[str, str, str, str]) -> Forecast | None:
         """The most recent forecast for one match — revisions included."""
         found: Forecast | None = None
         for forecast in self:
@@ -245,7 +287,7 @@ class ForecastBook:
                 found = forecast
         return found
 
-    def history_for(self, key: tuple[str, str, str]) -> tuple[Forecast, ...]:
+    def history_for(self, key: tuple[str, str, str, str]) -> tuple[Forecast, ...]:
         """Every version, oldest first — what makes a revision auditable."""
         return tuple(f for f in self if f.key == key)
 
@@ -290,7 +332,12 @@ def record_run(
         decision = analysis.decision
         main = decision.main if decision else None
         previous = book.latest_for(
-            (fixture.competition or "", fixture.home, fixture.away)
+            (
+                fixture.competition or "",
+                fixture.home,
+                fixture.away,
+                fixture.date.isoformat(),
+            )
         )
         probabilities = dossier.probabilities
         forecast = Forecast(
@@ -300,6 +347,11 @@ def record_run(
             home=fixture.home,
             away=fixture.away,
             kickoff=analysis.resolved.kickoff_local(),
+            kickoff_at=(
+                analysis.resolved.kickoff.isoformat()
+                if analysis.resolved.kickoff is not None
+                else ""
+            ),
             match_date=fixture.date.isoformat(),
             fingerprint=analysis.sealed.data_fingerprint,
             probabilities=(

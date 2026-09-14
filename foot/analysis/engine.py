@@ -390,7 +390,12 @@ class Engine:
         for source in self._lineup_sources:
             try:
                 found, notes = source.team_sheets(fixture)
-            except Exception:  # une source de feuilles cassée n'arrête pas l'analyse
+            except Exception as error:  # une source cassée n'arrête pas l'analyse…
+                # …mais elle ne disparaît pas non plus. Une exception avalée en
+                # silence se lit, plus bas, exactement comme « aucune
+                # composition publiée » — deux situations qui n'appellent pas
+                # du tout la même action de l'opérateur.
+                evidence.append(_source_failure(source.name, fixture, error))
                 continue
             evidence.extend(notes)
             for row in found:
@@ -1912,3 +1917,19 @@ def _capability_remedy(gap: frozenset[Capability]) -> str:
         else:
             parts.append(f"{capability.value} : aucun fournisseur catalogué")
     return " ; ".join(parts)
+
+
+def _source_failure(name: str, fixture: Fixture, error: Exception) -> Evidence:
+    """Record that a source raised, rather than letting it look like silence."""
+    return Evidence(
+        key=f"composition::{name}::{fixture.home}-{fixture.away}",
+        value=None,
+        source=Source(name=name, provider=name, official=False),
+        retrieved_at=utcnow(),
+        status=Confidence.UNAVAILABLE,
+        fact_date=fixture.date,
+        note=(
+            f"la source a échoué ({type(error).__name__}: {error}) — ce n'est pas "
+            f"« aucune composition publiée », c'est une source à réparer"
+        ),
+    )

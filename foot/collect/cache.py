@@ -48,6 +48,21 @@ class Cache:
         self._ttl = ttl_seconds
 
     @property
+    def ttl_seconds(self) -> float:
+        return self._ttl
+
+    def with_ttl(self, ttl_seconds: float) -> Cache:
+        """The same store, read with a different freshness rule.
+
+        An hour before kick-off, a six-hour cache is not a cache but a
+        blindfold: a T−75 response saying « no sheet yet » would still be
+        served at T−60, and the second check would read the first one's answer
+        without ever asking again. Same directory, so nothing is re-downloaded
+        that is genuinely fresh.
+        """
+        return Cache(self._directory, ttl_seconds=ttl_seconds)
+
+    @property
     def directory(self) -> Path:
         return self._directory
 

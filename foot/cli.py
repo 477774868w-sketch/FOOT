@@ -15,13 +15,14 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from foot import __version__
+from foot.analysis.closing import load_closing_csv, load_closing_from_sources
 from foot.analysis.engine import Engine, EngineConfig
 from foot.analysis.journey import JourneyResult, run_journey
 from foot.analysis.ledgerbook import DEFAULT_BOOK, ForecastBook, record_run
-from foot.analysis.measure import measure
+from foot.analysis.measure import ClosingPrices, measure
 from foot.analysis.request import DEFAULT_TIMEZONE, resolve_timezone
 from foot.analysis.rubrics import RUBRICS
-from foot.analysis.watch import WatchPlan, watch_until_kickoff
+from foot.analysis.watch import WATCH_CACHE_TTL, WatchPlan, watch_until_kickoff
 from foot.collect import (
     Cache,
     FootballDataProvider,
@@ -32,6 +33,7 @@ from foot.collect import (
 )
 from foot.collect.base import (
     CollectionError,
+    OddsSource,
     ProviderStatus,
     Reachability,
     SeasonData,
@@ -765,6 +767,9 @@ def command_suivre(args: argparse.Namespace) -> int:
     kickoff = dt.datetime.fromisoformat(args.coup_denvoi)
     if kickoff.tzinfo is None:
         kickoff = kickoff.replace(tzinfo=zone)
+    # A watch needs sheets that are actually fresh: the day-to-day six-hour
+    # cache would serve T−75's "nothing yet" answer again at T−60.
+    args.cache_ttl = WATCH_CACHE_TTL
     engine = Engine(
         _build_registry(args),
         config=EngineConfig(
@@ -822,7 +827,6 @@ def command_mesurer(args: argparse.Namespace) -> int:
         registry, config=EngineConfig(seasons=tuple(args.saisons))
     )
     played: list[Match] = []
-    closing: dict[str, float] = {}
     for competition in competitions:
         for season in args.saisons:
             try:
@@ -831,17 +835,41 @@ def command_mesurer(args: argparse.Namespace) -> int:
                 print(f"  {competition} {season} : {error}", file=sys.stderr)
                 continue
             played.extend(data.played)
+    closing = _closing_prices(args, registry, competitions)
     print(_heading("MESURE DES PRÉVISIONS ENREGISTRÉES"))
     print(f"  journal    : {book.path} ({len(forecasts)} ligne(s))")
     print(f"  résultats  : {len(played)} match(s) joués, {', '.join(competitions)}")
-    if not closing:
-        print(
-            "  clôture    : aucune source de cotes de clôture joignable "
-            "— l'écart au prix de clôture ne sera pas mesuré"
-        )
+    print(f"  clôture    : {closing.render()}")
     print()
-    print(measure(book, results=played, closing=closing).render())
+    report = measure(
+        book,
+        results=played,
+        closing=closing,
+        as_of=_moment(getattr(args, "date", None), args),
+        include_retrospective=bool(getattr(args, "avec_rejeux", False)),
+    )
+    print(report.render())
     return 0
+
+
+def _closing_prices(
+    args: argparse.Namespace, registry: Registry, competitions: Sequence[str]
+) -> ClosingPrices:
+    """Actually try to collect closing prices, by whichever route is available.
+
+    The explicit file wins when given: it works behind a proxy that refuses
+    everything, and an operator who can read a price can paste it. Otherwise the
+    registry's own odds sources are asked — and their failure is reported as a
+    failure, not as an absence.
+    """
+    if getattr(args, "clotures_csv", None):
+        return load_closing_csv(
+            args.clotures_csv, bookmaker=getattr(args, "bookmaker", "") or ""
+        )
+    sources = [p for p in registry if isinstance(p, OddsSource)]
+    return load_closing_from_sources(
+        sources, competitions=competitions, seasons=tuple(args.saisons)
+    )
 
 
 def _season_for(engine: Engine, competition: str, season: str) -> SeasonData:
@@ -1036,6 +1064,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="apparier le journal aux résultats et mesurer, sans rien y réécrire",
     )
     mesurer.add_argument("--fichier", default=str(DEFAULT_BOOK))
+    mesurer.add_argument(
+        "--clotures-csv",
+        help="cotes de clôture : date,home,away,marche,cote[,bookmaker,competition]",
+    )
+    mesurer.add_argument("--bookmaker", help="bookmaker des clôtures importées")
+    mesurer.add_argument(
+        "--date", help="date limite du rapport (ISO) : rien d'écrit après n'y entre"
+    )
+    mesurer.add_argument(
+        "--avec-rejeux",
+        action="store_true",
+        help="inclure les rejeux rétrospectifs, écartés par défaut du bilan",
+    )
+    mesurer.add_argument("--fuseau", default=DEFAULT_TIMEZONE)
     _data_options(mesurer)
     mesurer.set_defaults(handler=command_mesurer)
 

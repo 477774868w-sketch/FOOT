@@ -35,10 +35,17 @@ def normalise(text: str) -> str:
     'olympique marseille'
     >>> normalise("Manchester United FC")
     'manchester united'
+    >>> normalise("Arsenal F.C.")
+    'arsenal'
     """
     folded = unicodedata.normalize("NFKD", text.lower())
     folded = "".join(c for c in folded if not unicodedata.combining(c))
     folded = folded.replace("&", " and ").replace("'", " ").replace("-", " ")
+    # An abbreviation dot joins its letters instead of splitting them: "F.C."
+    # must fold to "fc", which the noise list then drops. Turning it into two
+    # separate words left "arsenal f c", which matched nothing. A dot after a
+    # digit is left alone, so "1. FSV Mainz" keeps its separation.
+    folded = re.sub(r"(?<=[a-z])\.", "", folded)
     folded = re.sub(r"[^a-z0-9 ]+", " ", folded)
     words = [w for w in folded.split() if w and w not in _NOISE]
     return " ".join(words) or folded.strip()

@@ -36,8 +36,13 @@ from test_acceptance import _COMP, StubProvider, _controlled_history
 from foot.analysis.engine import Engine, EngineConfig
 from foot.analysis.journey import run_journey
 from foot.analysis.ledgerbook import Forecast, ForecastBook, record_run
-from foot.analysis.measure import measure
-from foot.analysis.naming import TeamIndex, normalise
+from foot.analysis.measure import (
+    ClosingPrices,
+    ClosingState,
+    closing_key,
+    measure,
+)
+from foot.analysis.naming import TeamIndex
 from foot.analysis.watch import WatchPlan, due_soon, watch_until_kickoff
 from foot.collect.base import Capability, LineupSource
 from foot.collect.footballdata_org import CREDENTIAL
@@ -348,14 +353,14 @@ def test_a_revision_is_appended_and_never_replaces_the_first_forecast() -> None:
         )
         record_run(second.run.analyses, book=book, as_of=later_at, reason="cotes")
 
-        history = book.history_for((_COMP, "Club A", "Club B"))
+        history = book.history_for((_COMP, "Club A", "Club B", "2026-09-14"))
         assert len(history) == 2, "la révision s'ajoute, elle ne remplace pas"
         assert history[0].reason == "J−1"
         assert history[1].reason == "cotes"
         assert history[1].supersedes == history[0].fingerprint
         assert not history[1].confirms
         assert history[0].fingerprint != history[1].fingerprint
-        latest = book.latest_for((_COMP, "Club A", "Club B"))
+        latest = book.latest_for((_COMP, "Club A", "Club B", "2026-09-14"))
         assert latest is not None and latest.reason == "cotes"
 
 
@@ -374,7 +379,7 @@ def test_an_unchanged_call_is_recorded_as_confirmed_not_as_a_revision() -> None:
             result = run_journey(_engine(), matches=line, as_of=moment)
             record_run(result.run.analyses, book=book, as_of=moment, reason=why)
 
-        history = book.history_for((_COMP, "Club A", "Club B"))
+        history = book.history_for((_COMP, "Club A", "Club B", "2026-09-14"))
         assert len(history) == 2
         assert history[0].fingerprint != history[1].fingerprint, (
             "l'empreinte du dossier daté bouge, c'est attendu"
@@ -780,9 +785,13 @@ def test_the_closing_edge_measures_timing_and_says_so() -> None:
     book, _path, _ = _book_with(
         _forecast("Club A", "Club B", market_key="1X2:H", odds=2.20)
     )
-    key = f"{_COMP}|{normalise('Club A')}|{normalise('Club B')}|2026-09-14"
+    key = closing_key(_COMP, "Club A", "Club B", dt.date(2026, 9, 14), "1X2:H")
     report = measure(
-        book, results=[_played("Club A", "Club B", (1, 0))], closing={key: 2.00}
+        book,
+        results=[_played("Club A", "Club B", (1, 0))],
+        closing=ClosingPrices(
+            state=ClosingState.SERVED, prices={key: 2.00}, source="doublure"
+        ),
     )
     edge = report.resolved[0].closing_edge()
     assert edge is not None and abs(edge - 0.10) < 1e-9
@@ -795,7 +804,27 @@ def test_without_a_closing_price_the_gap_is_reported_as_unmeasured() -> None:
     )
     report = measure(book, results=[_played("Club A", "Club B", (1, 0))])
     assert report.resolved[0].closing_edge() is None
-    assert "reste non mesuré" in report.render()
+    # « non raccordé » is not « inaccessible » and not « la source est muette
+    # sur cette rencontre » : three states, three different next moves.
+    assert report.closing.state is ClosingState.NOT_WIRED
+    assert "non raccordé" in report.render()
+
+    reachable = measure(
+        book,
+        results=[_played("Club A", "Club B", (1, 0))],
+        closing=ClosingPrices(
+            state=ClosingState.SERVED, prices={}, source="doublure"
+        ),
+    )
+    assert "servi par doublure" in reachable.render()
+    assert "reste non mesuré" in reachable.render()
+
+    broken = measure(
+        book,
+        results=[_played("Club A", "Club B", (1, 0))],
+        closing=ClosingPrices(state=ClosingState.UNREACHABLE, detail="403 du proxy"),
+    )
+    assert "inaccessible — 403 du proxy" in broken.render()
 
 
 def test_measuring_writes_nothing_to_the_journal() -> None:

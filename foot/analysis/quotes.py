@@ -24,7 +24,7 @@ bookmaker and the quotation instant all travel with the price.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from foot.domain import Outcome
 from foot.markets.catalogue import (
@@ -75,6 +75,26 @@ def _number(text: str) -> float | None:
     return -value if match.group(1) == "-" else value
 
 
+_OVER = frozenset({"OVER", "O", "PLUS", "+"})
+_UNDER = frozenset({"UNDER", "U", "MOINS", "-"})
+
+
+def _side_word(parts: Sequence[str]) -> bool | None:
+    """Read an explicit over/under word, or ``None`` when none is given.
+
+    Returned as a tri-state on purpose: « absent » and « under » are different
+    answers, and collapsing them to ``False`` is exactly how ``OU:4.5:under``
+    came back as an over.
+    """
+    for part in parts:
+        token = part.strip().upper()
+        if token in _OVER:
+            return True
+        if token in _UNDER:
+            return False
+    return None
+
+
 def offer_for_key(key: str) -> MarketOffer | None:  # noqa: PLR0911
     """Build the offer a quotation token names, or ``None`` if unrecognised.
 
@@ -107,8 +127,14 @@ def offer_for_key(key: str) -> MarketOffer | None:  # noqa: PLR0911
         line = _number(rest[0])
         if line is None:
             return None
-        # A sign selects the side: "+2.5" is over, "-2.5" is under.
-        over = not rest[0].strip().startswith("-")
+        # Two ways of naming the side, and the explicit word wins. The catalogue
+        # writes its own keys as ``OU:4.5:under``; reading that back as *over*
+        # meant the evaluation settled the opposite bet from the one
+        # recommended, silently and with the right-looking line.
+        over = _side_word(rest[1:])
+        if over is None:
+            # No word: the sign selects. "+2.5" is over, "-2.5" is under.
+            over = not rest[0].strip().startswith("-")
         return total_goals(abs(line), over=over)
     if head == "AH" and len(rest) >= 2:
         line = _number(rest[1])
@@ -119,7 +145,9 @@ def offer_for_key(key: str) -> MarketOffer | None:  # noqa: PLR0911
         line = _number(rest[1])
         if line is None or rest[0] not in _OUTCOMES:
             return None
-        over = not rest[1].strip().startswith("-")
+        over = _side_word(rest[2:])
+        if over is None:
+            over = not rest[1].strip().startswith("-")
         return team_total(
             abs(line), home=_OUTCOMES[rest[0]] is Outcome.HOME_WIN, over=over
         )

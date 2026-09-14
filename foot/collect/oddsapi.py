@@ -33,6 +33,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from foot.analysis.naming import normalise
 from foot.collect.base import (
     Capability,
     CollectionError,
@@ -395,6 +396,14 @@ class OddsApiProvider:
         consult it after sealing the dossier without knowing this class exists.
         A fixture the API does not cover returns nothing — reported as "no price
         available", never as a missing market.
+
+        Club names are matched through :func:`~foot.analysis.naming.normalise`,
+        not by string equality: the API says « Arsenal » where our calendar says
+        « Arsenal FC », and requiring an exact match meant the price for that
+        match simply never appeared. Folding is not guessing — the date and the
+        pairing must still agree exactly, and two API fixtures folding onto the
+        same pair on the same day are **refused**, because pricing one of them
+        arbitrarily is worse than quoting nothing.
         """
         competition = fixture.competition or ""
         if competition not in SPORT_KEYS:
@@ -403,14 +412,33 @@ class OddsApiProvider:
             quotes, _retrieved = self.odds_for(competition)
         except (CollectionError, ProviderBlockedError):
             return {}
-        matching = [
-            quote
-            for quote in quotes
-            if quote.fixture.home == fixture.home
-            and quote.fixture.away == fixture.away
-            and quote.fixture.date == fixture.date
-        ]
+        matching = _quotes_for(quotes, fixture)
         return {
             key: (quote.price, quote.quoted_at, quote.label)
             for key, quote in best_prices(matching, prefer=self._bookmaker).items()
         }
+
+
+def _quotes_for(
+    quotes: Sequence[QuotedPrice], fixture: Fixture
+) -> tuple[QuotedPrice, ...]:
+    """Prices for one fixture, matched on folded club names — or none at all.
+
+    Grouped before being returned so an ambiguity is visible rather than
+    resolved by list order: if the folded pairing and date match two different
+    API events, neither is used.
+    """
+    wanted = (normalise(fixture.home), normalise(fixture.away), fixture.date)
+    groups: dict[tuple[str, str], list[QuotedPrice]] = {}
+    for quote in quotes:
+        folded = (
+            normalise(quote.fixture.home),
+            normalise(quote.fixture.away),
+            quote.fixture.date,
+        )
+        if folded != wanted:
+            continue
+        groups.setdefault((quote.fixture.home, quote.fixture.away), []).append(quote)
+    if len(groups) != 1:
+        return ()
+    return tuple(next(iter(groups.values())))

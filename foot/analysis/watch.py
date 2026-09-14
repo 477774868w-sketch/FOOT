@@ -15,8 +15,15 @@ Ce module exécute la boucle.  Il ne promet rien de plus que ce qu'il fait :
 * il **relance l'analyse** quand une feuille arrive, et compare la décision
   d'avant à celle d'après — un changement de composition qui ne change rien à la
   décision est une information, pas un silence ;
-* il **préserve l'heure réelle des cotes** : une actualisation ne redate aucun
-  prix. C'est le moteur qui le garantit, et un test le vérifie ici aussi.
+* il **préserve l'heure réelle des cotes** : une cote saisie une fois garde
+  l'heure de son relevé initial tant qu'aucun nouveau prix n'a réellement été
+  observé. Relancer l'analyse à 19:45 ne rend pas plus fraîche une cote lue à
+  19:30 ;
+* il n'annonce « composition officielle » que devant **deux feuilles complètes**
+  — une par équipe, onze titulaires chacune. Un joueur par équipe n'est pas une
+  composition, et s'arrêter dessus ferait manquer la vraie ;
+* il exécute **toujours** le contrôle T−60, même quand une feuille est arrivée à
+  T−75 : c'est entre les deux que les compositions changent.
 
 Rien dans ce module ne place de pari, et rien n'engage : il rafraîchit une
 analyse et dit ce qui a changé.
@@ -33,13 +40,35 @@ from foot.analysis.engine import Engine
 from foot.analysis.journey import JourneyResult, run_journey
 from foot.analysis.request import DEFAULT_TIMEZONE
 
-__all__ = ["Attempt", "WatchPlan", "WatchReport", "watch_until_kickoff"]
+__all__ = [
+    "WATCH_CACHE_TTL",
+    "Attempt",
+    "WatchPlan",
+    "WatchReport",
+    "watch_until_kickoff",
+]
+
+_BOTH_TEAMS = 2
+"""A fixture has two team sheets. Anything less is a partial observation."""
 
 FIRST_CHECK = dt.timedelta(minutes=75)
 """How long before kick-off the first check is due — the protocol's T−75."""
 
 SECOND_CHECK = dt.timedelta(minutes=60)
 """The confirmation pass, the protocol's T−60."""
+
+WATCH_CACHE_TTL = 120.0
+"""Seconds a cached response stays usable **during a watch**.
+
+The day-to-day cache holds for six hours, which is right for a season's results
+and wrong for a team sheet: a T−75 response saying « nothing published » would
+still be served at T−60, so the second check would replay the first one's answer
+without ever asking again.
+
+Two minutes is short enough that each protocol checkpoint is a real request, and
+long enough that a burst of retries — or two fixtures watched side by side —
+does not spend a quota on the same URL twice.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,9 +77,14 @@ class Attempt:
 
     at: dt.datetime
     found_official: bool
+    """Two complete official sheets — not merely one confirmed line."""
+
     sheets: int
-    decision: str
-    fingerprint: str
+    complete_sheets: int = 0
+    """Teams whose sheet names a full eleven."""
+
+    decision: str = ""
+    fingerprint: str = ""
     changed: bool = False
     """Whether the decision differs from the previous successful attempt."""
 
@@ -60,10 +94,11 @@ class Attempt:
         moment = self.at.strftime("%H:%M %Z")
         if not self.sheets:
             return f"  {moment} — aucune composition publiée {self.note}".rstrip()
-        status = "officielle" if self.found_official else "probable"
+        status = "officielle et complète" if self.found_official else "partielle"
         verdict = " · DÉCISION MODIFIÉE" if self.changed else " · décision inchangée"
         return (
-            f"  {moment} — composition {status} ({self.sheets} joueur(s)) → "
+            f"  {moment} — composition {status} ({self.sheets} joueur(s), "
+            f"{self.complete_sheets}/2 feuille(s) complète(s)) → "
             f"{self.decision}{verdict}"
         )
 
@@ -145,6 +180,7 @@ def watch_until_kickoff(
     matches: str,
     plan: WatchPlan,
     bookmaker: str | None = None,
+    quoted_at: dt.datetime | None = None,
     now: Callable[[], dt.datetime] | None = None,
     sleep: Callable[[float], None] | None = None,
     max_attempts: int = 40,
@@ -157,16 +193,24 @@ def watch_until_kickoff(
             real clock otherwise.
         sleep: injected for the same reason. A watch that cannot be tested
             without waiting an hour would never be tested.
+        quoted_at: when the operator's prices were actually observed. Defaults
+            to the first check, which is when they were handed over. It does
+            **not** advance with the checks: re-running the analysis at 19:45
+            does not make a price read at 19:30 fifteen minutes fresher, and
+            letting it would have hidden exactly the staleness the freshness
+            rule exists to catch.
         max_attempts: a hard stop, so a misconfigured kick-off cannot spin.
 
     The analysis is re-run **as of the moment of the check**, never as of the
-    first run: that is what lets a sheet published at T−62 count, and what keeps
-    a price quoted two days ago at its real age.
+    first run: that is what lets a sheet published at T−62 count. The prices,
+    however, keep the hour they were really seen.
     """
     clock = now or (lambda: dt.datetime.now(plan.kickoff.tzinfo or dt.timezone.utc))
     pause = sleep or _sleep
     report = WatchReport(fixture=_label(matches), plan=plan)
     previous: str | None = None
+    # Fixed once, before the loop: the instant the operator's prices were seen.
+    priced_at = quoted_at
 
     for due in plan.due_times():
         if len(report.attempts) >= max_attempts:
@@ -179,6 +223,9 @@ def watch_until_kickoff(
         if due > current:
             pause((due - current).total_seconds())
             current = clock()
+        if priced_at is None:
+            # The first check is when the operator handed the prices over.
+            priced_at = current
         if current > plan.kickoff:
             report.stopped_because = "coup d'envoi passé"
             break
@@ -188,6 +235,7 @@ def watch_until_kickoff(
             as_of=current,
             timezone=plan.timezone,
             bookmaker=bookmaker,
+            quoted_at=priced_at,
             watching=True,
         )
         attempt = _observe(result, at=current, previous=previous)
@@ -196,8 +244,13 @@ def watch_until_kickoff(
             on_attempt(attempt, result)
         if attempt.sheets:
             previous = attempt.fingerprint
-            if attempt.found_official:
-                report.stopped_because = "composition officielle obtenue"
+            # Both sheets complete *and* past the T−60 checkpoint. A sheet that
+            # arrives at T−75 is not the last word: the protocol's second check
+            # exists because that is when it changes.
+            if attempt.found_official and current >= plan.kickoff - plan.second:
+                report.stopped_because = (
+                    "deux compositions officielles complètes, contrôle T−60 effectué"
+                )
                 break
     else:
         if not report.stopped_because:
@@ -221,14 +274,34 @@ def _observe(
             note="(rencontre non analysable à cet instant)",
         )
     plan = analysis.lineup_plan
-    sheets = sum(o.starters + o.bench for o in plan.observations) if plan else 0
-    official = bool(plan and plan.has_official)
+    observations = plan.observations if plan else []
+    sheets = sum(o.starters + o.bench for o in observations)
+    # « Officielle » means both teams, each with a full eleven. One confirmed
+    # line per side satisfied `has_official` and stopped the watch at T−75 with
+    # two players on the sheet — the run then never looked again, and the real
+    # lineup was never seen.
+    complete = sum(1 for o in observations if o.official and o.complete)
+    official = complete >= _BOTH_TEAMS
     decision = analysis.decision.status.value if analysis.decision else "—"
-    fingerprint = f"{analysis.sealed.data_fingerprint}:{decision}"
+    # Compared on **substance**, never on the sealed fingerprint: a dossier is
+    # dated, so its digest moves at every check and every re-run would be
+    # announced as « DÉCISION MODIFIÉE ». What an operator needs to see changed
+    # is the call, its price, its confidence and the sheets behind it.
+    chosen = analysis.decision.main if analysis.decision else None
+    fingerprint = "|".join(
+        (
+            decision,
+            chosen.offer.key if chosen else "",
+            f"{chosen.offer.odds:.2f}" if chosen and chosen.offer.odds else "",
+            analysis.decision.confidence.value if analysis.decision else "",
+            f"{complete}/{sheets}",
+        )
+    )
     return Attempt(
         at=at,
         found_official=official,
         sheets=sheets,
+        complete_sheets=complete,
         decision=decision,
         fingerprint=fingerprint,
         changed=previous is not None and fingerprint != previous,

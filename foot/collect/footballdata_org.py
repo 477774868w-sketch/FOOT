@@ -357,7 +357,11 @@ class FootballDataOrgProvider:
             rows,
             Evidence(
                 key=f"composition::football-data.org::{match_id}",
-                value=f"{len(rows)} joueur(s)",
+                # An unavailable fact carries **no** value: the dataclass
+                # enforces it, and passing "0 joueur(s)" raised a ValueError the
+                # engine then swallowed, turning "no sheet served" into a source
+                # that silently failed. Absence must be a state, not an error.
+                value=f"{len(rows)} joueur(s)" if rows else None,
                 source=self.source(f"{_BASE}/matches/{match_id}"),
                 retrieved_at=retrieved,
                 status=Confidence.CONFIRMED if rows else Confidence.UNAVAILABLE,
@@ -415,7 +419,7 @@ class FootballDataOrgProvider:
         """Say why no sheet came back — never that none was published."""
         return Evidence(
             key=f"composition::football-data.org::{fixture.home}-{fixture.away}",
-            value="aucune composition récupérée",
+            value=None,  # unavailable: the reason lives in ``note``, not in a value
             source=self.source(),
             retrieved_at=utcnow(),
             status=Confidence.UNAVAILABLE,

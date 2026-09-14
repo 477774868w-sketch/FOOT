@@ -30,20 +30,25 @@ from __future__ import annotations
 import datetime as dt
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 
 from foot.analysis.ledgerbook import Forecast, ForecastBook
 from foot.analysis.naming import normalise
+from foot.analysis.quotes import offer_for_key
 from foot.domain import Match, Outcome, OutcomeProbabilities, Score
 from foot.evaluation.calibration import CalibrationReport, calibration_report
 from foot.evaluation.metrics import ScoreCard
-from foot.markets.catalogue import MarketOffer, standard_catalogue
+from foot.markets.catalogue import MarketOffer
 from foot.markets.settlement import unit_return
 
 __all__ = [
     "MIN_TO_CONCLUDE",
+    "ClosingPrices",
+    "ClosingState",
     "Measurement",
     "ResolvedForecast",
+    "closing_key",
     "measure",
 ]
 
@@ -55,7 +60,49 @@ interval on any rate of return spans both signs, and the reader deserves to be
 told that rather than shown a percentage.
 """
 
-_CATALOGUE: Mapping[str, MarketOffer] = {o.key: o for o in standard_catalogue()}
+class ClosingState(Enum):
+    """Why a closing price is missing — three answers, three different actions."""
+
+    NOT_WIRED = "non raccordé"
+    """No closing source was given to the measurement at all."""
+
+    UNREACHABLE = "inaccessible"
+    """A source was configured and could not be reached or read."""
+
+    SERVED = "servi"
+    """A source answered; individual fixtures may still be absent from it."""
+
+
+@dataclass(frozen=True, slots=True)
+class ClosingPrices:
+    """Closing prices, with the reason when there are none.
+
+    « No source plugged in », « the source refused the connection » and « the
+    source answered but does not carry this match » are three different facts.
+    Reporting all three as one blank line is how a missing integration hides
+    behind a network excuse.
+    """
+
+    state: ClosingState = ClosingState.NOT_WIRED
+    prices: Mapping[str, float] = field(default_factory=dict)
+    source: str = ""
+    detail: str = ""
+
+    def get(self, key: str) -> float | None:
+        return self.prices.get(key)
+
+    def render(self) -> str:
+        if self.state is ClosingState.NOT_WIRED:
+            return (
+                "non raccordé — aucune source de clôture n'a été fournie à la "
+                "mesure (voir « --clotures-csv » ou un fournisseur de cotes)"
+            )
+        if self.state is ClosingState.UNREACHABLE:
+            return f"inaccessible — {self.detail or 'source injoignable'}"
+        return (
+            f"servi par {self.source or 'une source'} : {len(self.prices)} "
+            f"cote(s) de clôture disponibles"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,9 +112,12 @@ class ResolvedForecast:
     forecast: Forecast
     score: Score
     closing: float | None = None
-    """Closing price of the market backed, when a source served one."""
+    """Closing price of the **same market**, when a source served one."""
 
     closing_book: str = ""
+
+    score_date: dt.date | None = None
+    """Date of the match actually joined — the identity a duplicate collides on."""
 
     @property
     def outcome(self) -> Outcome:
@@ -83,8 +133,16 @@ class ResolvedForecast:
 
     @property
     def offer(self) -> MarketOffer | None:
-        """The market backed, when the journal recorded a settleable key."""
-        return _CATALOGUE.get(self.forecast.market_key)
+        """The market backed, rebuilt by the **same resolver** the engine used.
+
+        Looking the key up in the standard catalogue silently dropped every
+        market the engine accepts but the catalogue does not list — an Asian
+        ``-1.75``, a total at 4.5 — so a recommendation could be made, priced
+        and staked, then vanish from the ledger of results. A market that can be
+        recommended must be settleable.
+        """
+        key = self.forecast.market_key
+        return offer_for_key(key) if key else None
 
     def profit(self) -> float | None:
         """Realised profit per unit staked, or ``None`` when nothing was backed.
@@ -119,11 +177,18 @@ class Measurement:
 
     resolved: tuple[ResolvedForecast, ...]
     pending: tuple[Forecast, ...]
+    excluded: tuple[Forecast, ...] = ()
+    """Lines left out, and why matters: written after the cut-off, after their
+    own kick-off, or part of a retrospective replay. Counted and named rather
+    than dropped, so a shrinking sample is visible."""
+
     scorecard: ScoreCard | None = None
     baseline: ScoreCard | None = None
     calibration: CalibrationReport | None = None
     revised: int = 0
     """Matches whose forecast was revised at least once before kick-off."""
+
+    closing: ClosingPrices = field(default_factory=ClosingPrices)
 
     @property
     def conclusive(self) -> bool:
@@ -152,6 +217,12 @@ class Measurement:
             f"Mesure de {len(self.resolved)} rencontre(s) résolue(s), "
             f"{len(self.pending)} en attente"
         ]
+        if self.excluded:
+            lines.append(
+                f"  {len(self.excluded)} ligne(s) écartée(s) : postérieure(s) à la "
+                f"date du rapport, au coup d'envoi, ou issue(s) d'un rejeu "
+                f"rétrospectif"
+            )
         if self.revised:
             lines.append(
                 f"  {self.revised} prévision(s) révisée(s) avant le coup d'envoi ; "
@@ -205,10 +276,12 @@ class Measurement:
             )
         edge = self.mean_closing_edge()
         if edge is None:
-            lines.append(
-                "  Cotes de clôture : aucune source n'en a servi pour ces "
-                "rencontres — l'écart au prix de clôture reste non mesuré."
-            )
+            lines.append(f"  Cotes de clôture : {self.closing.render()}.")
+            if self.closing.state is ClosingState.SERVED:
+                lines.append(
+                    "  Aucune des rencontres mesurées n'y figure avec le marché "
+                    "retenu : l'écart au prix de clôture reste non mesuré."
+                )
         else:
             lines.append(
                 f"  Écart moyen au prix de clôture : {edge * 100:+.2f}% "
@@ -240,31 +313,62 @@ def measure(
     book: ForecastBook,
     *,
     results: Sequence[Match],
-    closing: Mapping[str, float] | None = None,
+    closing: ClosingPrices | None = None,
     as_of: dt.datetime | None = None,
+    include_retrospective: bool = False,
 ) -> Measurement:
     """Join the journal to what happened, and score it.
 
+    Four instants are kept apart here, because conflating any two of them lets a
+    measurement flatter itself:
+
+    ``recorded_at``
+        when the line was physically written;
+    ``as_of``  (on the forecast)
+        the instant the forecast claims to see from — a historical replay sets
+        it in the past on purpose;
+    ``kickoff_at``
+        when the match started, and therefore the last moment a forecast can
+        still be a forecast;
+    ``as_of``  (this argument)
+        the report's cut-off: nothing written after it may enter the score.
+
     Args:
         results: played matches, from whatever source already loaded them.
-        closing: ``{clé de rencontre: cote de clôture du marché retenu}``, when
-            a source serves closing prices. Absent is reported as absent.
-        as_of: forecasts for matches after this instant stay pending even if a
-            result somehow exists; defaults to no cut.
+        closing: closing prices **and the reason when there are none** — not
+            wired, unreachable, or served but silent on this fixture.
+        as_of: report cut-off. A forecast recorded after it is excluded — asking
+            for "the report as it stood on 14 September" must not be answered
+            with a line written on the 15th.
+        include_retrospective: whether replays — forecasts written after their
+            own kick-off — join the score. Off by default: they are useful, and
+            they are not forecasts anybody stood behind beforehand.
 
-    Only the **last** forecast per match is scored. Scoring every revision would
-    count one match several times and reward whoever revises most often.
+    Among the admissible lines, the **latest by ``as_of``** is scored, not the
+    last one appended: a journal is a file, and file order is not chronology.
     """
-    del as_of  # reserved: the journal is already cut by construction
     index = {
         _key(m.competition or "", m.home, m.away, m.date): m for m in results
     }
-    prices = dict(closing or {})
+    prices = closing or ClosingPrices()
 
-    latest: dict[tuple[str, str, str], Forecast] = {}
-    revisions: dict[tuple[str, str, str], int] = {}
+    latest: dict[tuple[str, str, str, str], Forecast] = {}
+    revisions: dict[tuple[str, str, str, str], int] = {}
+    excluded: list[Forecast] = []
     for forecast in book:
-        latest[forecast.key] = forecast
+        if as_of is not None and forecast.recorded_at > as_of:
+            excluded.append(forecast)
+            continue
+        if forecast.retrospective and not include_retrospective:
+            excluded.append(forecast)
+            continue
+        kickoff = forecast.kickoff_instant
+        if kickoff is not None and forecast.as_of > kickoff:
+            excluded.append(forecast)  # made after kick-off: not a forecast
+            continue
+        held = latest.get(forecast.key)
+        if held is None or forecast.as_of >= held.as_of:
+            latest[forecast.key] = forecast
         if forecast.supersedes:
             revisions[forecast.key] = revisions.get(forecast.key, 0) + 1
 
@@ -275,17 +379,24 @@ def measure(
         if match is None or match.score is None:
             pending.append(forecast)
             continue
-        key = _key(
-            forecast.competition, forecast.home, forecast.away, match.date
+        quoted = closing_key(
+            forecast.competition,
+            forecast.home,
+            forecast.away,
+            match.date,
+            forecast.market_key,
         )
         resolved.append(
             ResolvedForecast(
                 forecast=forecast,
                 score=match.score,
-                closing=prices.get(key),
-                closing_book="" if key not in prices else "source de clôture",
+                score_date=match.date,
+                closing=prices.get(quoted),
+                closing_book=prices.source if prices.get(quoted) else "",
             )
         )
+    resolved, duplicates = _one_per_fixture(resolved)
+    excluded.extend(duplicates)
 
     scorecard = baseline = None
     calibration = None
@@ -300,11 +411,58 @@ def measure(
     return Measurement(
         resolved=tuple(resolved),
         pending=tuple(pending),
+        excluded=tuple(excluded),
         scorecard=scorecard,
         baseline=baseline,
         calibration=calibration,
         revised=sum(1 for count in revisions.values() if count),
+        closing=prices,
     )
+
+
+def _one_per_fixture(
+    resolved: Sequence[ResolvedForecast],
+) -> tuple[list[ResolvedForecast], list[Forecast]]:
+    """Keep one forecast per **resolved match**, whatever route found it.
+
+    A journal written before fixture dates existed still resolves, by its teams
+    alone, when exactly one played match pairs them. That is compatibility, not
+    guesswork — but it means an old line and a new dated line can land on the
+    same match, and scoring both would count that match twice.
+
+    The dated line wins, then the latest by ``as_of``. The loser is reported as
+    excluded rather than dropped, so the count stays auditable.
+    """
+    best: dict[tuple[str, str, str, str], ResolvedForecast] = {}
+    dropped: list[Forecast] = []
+    for item in resolved:
+        identity = (
+            item.forecast.competition,
+            normalise(item.forecast.home),
+            normalise(item.forecast.away),
+            item.score_date.isoformat() if item.score_date else "",
+        )
+        held = best.get(identity)
+        if held is None:
+            best[identity] = item
+            continue
+        winner, loser = _prefer(held, item)
+        best[identity] = winner
+        dropped.append(loser.forecast)
+    return (list(best.values()), dropped)
+
+
+def _prefer(
+    held: ResolvedForecast, candidate: ResolvedForecast
+) -> tuple[ResolvedForecast, ResolvedForecast]:
+    """Between two forecasts of the same match, the better-identified one."""
+    dated_held = bool(held.forecast.match_date)
+    dated_new = bool(candidate.forecast.match_date)
+    if dated_held != dated_new:
+        return (held, candidate) if dated_held else (candidate, held)
+    if candidate.forecast.as_of >= held.forecast.as_of:
+        return (candidate, held)
+    return (held, candidate)
 
 
 def _base_rate(outcomes: Sequence[Outcome]) -> OutcomeProbabilities:
@@ -318,6 +476,18 @@ def _base_rate(outcomes: Sequence[Outcome]) -> OutcomeProbabilities:
     return OutcomeProbabilities(
         counts[Outcome.HOME_WIN], counts[Outcome.DRAW], counts[Outcome.AWAY_WIN]
     )
+
+
+def closing_key(
+    competition: str, home: str, away: str, date: dt.date, market: str
+) -> str:
+    """Identity of one **priced market on one fixture**.
+
+    A closing price belongs to a match *and* a market *and* a line — comparing
+    the price taken on ``OU:2.5:over`` with the closing price of ``1X2:H`` would
+    produce a number that means nothing at all.
+    """
+    return f"{_key(competition, home, away, date)}#{market.strip().upper()}"
 
 
 def _key(competition: str, home: str, away: str, date: dt.date) -> str:
