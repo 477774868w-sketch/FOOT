@@ -68,9 +68,50 @@ trop court à l'usage.
 | Option | Coût | Remarque |
 |---|---|---|
 | Sur votre propre machine, Wi-Fi domestique | 0 € | ce qui fonctionne aujourd'hui |
-| Petit serveur en ligne (VPS) | ≈ 5 €/mois | nécessaire pour un accès hors du domicile |
-| Nom de domaine | ≈ 10 €/an | pour un certificat HTTPS nominatif |
-| Certificat HTTPS (Let's Encrypt) | 0 € | automatisable avec `certbot` ou Caddy |
+| **Render** (configuration fournie, `render.yaml`) | **≈ 7,25 $/mois** | détaillé au § 2 bis ci-dessous |
+| Petit serveur en ligne (VPS) | ≈ 5 €/mois | moins cher, mais tout est à installer et à renouveler à la main |
+| Nom de domaine | ≈ 10 €/an | facultatif : Render fournit une adresse en `.onrender.com` |
+| Certificat HTTPS | 0 € | inclus chez Render ; `certbot` ou Caddy sur un VPS |
+
+---
+
+## 2 bis. Hébergement sur Render — le coût exact, avant toute validation
+
+**Ce que vous paieriez, par mois, pour le service décrit dans `render.yaml` :**
+
+| Ligne | Montant annoncé | Pourquoi cette ligne |
+|---|---|---|
+| Instance web, plan **Starter** | **7,00 $/mois** | le plan gratuit n'accepte **pas** de disque persistant et s'endort après ~15 min sans visite : le journal disparaîtrait à chaque déploiement et le contrôle de T−75 n'aurait pas lieu |
+| **Disque persistant**, 1 Go | **0,25 $/mois** (0,25 $/Go/mois) | journal des prévisions, fichier des suivis, cache |
+| Trafic sortant | **0 $** en pratique | une enveloppe mensuelle est incluse ; quelques pages de texte par jour en consomment une fraction négligeable |
+| Certificat HTTPS, adresse `*.onrender.com` | **0 $** | inclus |
+| **Total** | **≈ 7,25 $/mois** | |
+
+À quoi s'ajoute, séparément et chez leurs éditeurs :
+
+| | Montant | Décision |
+|---|---|---|
+| API-Football, plan **Pro** | ≈ 19 €/mois | la vôtre, directement chez API-Football |
+| The Odds API, plan **gratuit** | 0 € | 500 requêtes/mois — commencez par là |
+
+**Deux réserves, à lire avant de valider :**
+
+1. **Ces montants sont ceux que je connais, pas ceux que j'ai lus aujourd'hui.**
+   L'environnement où ce code a été écrit n'a pas accès à la page tarifaire de
+   Render. **Le montant qui fait foi est celui que Render affiche à l'écran
+   avant que vous ne confirmiez la création du service.** S'il diffère de ce
+   tableau, c'est Render qui a raison — arrêtez-vous et dites-le moi.
+2. **Le disque se redimensionne à la hausse, jamais à la baisse.** 1 Go est
+   très large pour un journal en texte ; ne prenez pas plus « par sécurité ».
+
+**Ce que ce coût n'achète pas :** rien sur le plan sportif. L'hébergement rend
+l'outil joignable depuis le téléphone, sans ordinateur allumé à la maison. Il
+n'ajoute aucune donnée, ne débloque aucune rubrique, et ne change rien à ce que
+dit le § 3 ci-dessous.
+
+**Ce qui coûte 0 € et fait presque tout :** votre propre machine, en Wi-Fi
+domestique, avec `python3 -m foot web --jeton`. Si vous n'analysez que chez
+vous, l'hébergement est une dépense de confort.
 
 ---
 
@@ -84,9 +125,11 @@ trop court à l'usage.
   site ne décrit. C'est pourquoi `foot fournisseurs --couverture` **sonde** et
   rapporte ce que votre compte obtient réellement : payez d'abord le mois le
   moins cher, sondez, puis décidez.
-- **Aucun suivi durable.** Un suivi lancé aujourd'hui ne survit pas au
-  redémarrage du serveur. Le rendre durable est du développement, pas un
-  abonnement.
+- **Aucun suivi durable sans fichier de suivis.** Un suivi lancé sans l'option
+  `--suivis` ne survit pas au redémarrage du serveur. La configuration Render
+  fournie l'active et pose le fichier sur le disque persistant : les suivis
+  repartent après un déploiement, sauf ceux dont le coup d'envoi est passé
+  entre-temps, marqués « manqué » plutôt que présentés comme faits.
 
 ---
 
@@ -103,5 +146,9 @@ Rien n'est engagé tant que vous ne le dites pas. Trois décisions, séparées :
    vraiment la couverture. L'adaptateur est désormais écrit et testé ; la
    première chose à faire avec la clé est `foot couverture`, qui dira champ par
    champ ce que le plan sert avant que vous ne renouveliez.
+
+4. **Créer le service Render (≈ 7,25 $/mois) ?** — la configuration est écrite
+   et vérifiée ; rien n'est créé tant que vous ne confirmez pas dans Render, et
+   le montant affiché à ce moment-là est celui qui compte.
 
 Dites-moi lesquelles vous voulez, et je m'arrête là où vous vous arrêtez.

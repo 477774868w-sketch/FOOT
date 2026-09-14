@@ -238,7 +238,7 @@ La grille distingue désormais quatre états, et le rapport les affiche :
 | ● | opérationnel | R01–R06, R13, R16–R18, R20, R22 |
 | ◐ | opérationnel sur données fournies | R07, R10, R11, R21 — via `--xg-csv`, `--absences-csv`, `--compositions-csv` ; R19 — via les cotes saisies en ligne |
 | ○ | développé mais inaccessible | R15 (arbitre, météo : `foot.collect.footballdata` écrit, hôte bloqué) |
-| · | non développé | R08, R09, R12, R14 — aucun adaptateur n'existe pour les événements détaillés |
+| · | non développé | R08, R09, R12, R14 — aucun traitement n'est écrit, et la rubrique dit ce qu'il faudrait (§17.6) |
 
 Les imports opérateur annoncés dans la grille sont **réellement exposés par la
 CLI** : `test_r8e` échoue si une option déclarée n'existe pas. Vérifié sur
@@ -908,7 +908,7 @@ Deux défauts trouvés en corrigeant, corrigés aussi :
 
 | Fonction | Preuve |
 |---|---|
-| Trois actions sur l'écran du téléphone — Analyser, Suivre, Bilan | parcours complet exécuté sur serveur réel, les trois boutons appelés sur une rencontre réelle |
+| Trois actions sur l'écran du téléphone — Analyser, Suivre, Bilan | parcours complet exécuté sur serveur réel, les trois boutons appelés sur une rencontre réelle *(une quatrième, Contrôles, s'y ajoute au §17.3)* |
 | Suivi exécuté **côté serveur**, survivant à la fermeture de l'onglet | `foot/analysis/supervisor.py`, 5 tests |
 | Journal sauvegardable et **restaurable** | fichier en ajout seul ; un test copie, restaure et relit à l'identique |
 | Provenance et fraîcheur **rubrique par rubrique** | `foot analyser --provenance` |
@@ -921,9 +921,9 @@ Deux défauts trouvés en corrigeant, corrigés aussi :
 * **Écart au prix de clôture : non mesuré ici.** Le code existe et est testé ;
   la source gratuite qui le servirait est injoignable depuis cet environnement.
   Un import explicite (`--clotures-csv`) contourne la contrainte.
-* **Un suivi ne survit pas au redémarrage du serveur.** Un planificateur durable
-  est une autre promesse ; l'annoncer sans un stockage résistant au redémarrage
-  serait exactement le mécanisme annoncé-mais-absent que ce projet refuse.
+* **Un suivi ne survit pas au redémarrage du serveur.** *(Levée au §17 : les
+  suivis sont désormais écrits et repris, et un coup d'envoi passé pendant
+  l'arrêt est déclaré manqué plutôt que présenté comme fait.)*
 * **Aucun avantage prédictif démontré.** Sur 80 rencontres disjointes,
   l'intervalle de confiance de l'écart de RPS contient zéro (§12.2).
 
@@ -1304,3 +1304,189 @@ mypy .                       propre, 102 fichiers
 Séparation sport/cotes et protections chronologiques conservées : la coupure
 n'avance que pour une analyse courante, bornée par sa propre collecte, et le
 dossier reste scellé avant toute lecture de cote.
+
+---
+
+## 17. Installation téléphone : hébergement, contrôles, secrets (neuvième revue)
+
+Quatre demandes, plus une correction trouvée en les traitant. Rien n'est déclaré
+ici qui ne soit exécuté par un test ou reproduit sur un serveur réel.
+
+### 17.1 Le parcours par défaut du navigateur analysait le passé
+
+`do_GET` préremplissait le champ date avec l'heure du chargement, et `do_POST`
+n'activait le mode direct que si ce champ était **vide**. Ouvrir la page, taper
+deux équipes et appuyer sur **Analyser** — le geste ordinaire — rejouait donc la
+minute où la page avait été ouverte, et excluait tout ce qui avait été publié
+depuis.
+
+```
+AVANT   <input type="datetime-local" id="date" value="2026-09-14T09:12">   live=False
+APRÈS   <input type="datetime-local" id="date" value="">                   live=True
+```
+
+Le rejeu reste possible et reste un choix : il se tape. Le champ porte
+maintenant la phrase qui le dit, et la libellé est passée de « Date de
+l'analyse » à « Date et heure de l'analyse ».
+
+### 17.2 Le bookmaker saisi n'atteignait pas le fournisseur
+
+`MarketSource.market_prices` ne prenait que la rencontre ; le bookmaker n'était
+connu que de l'instance construite au démarrage. Un serveur construit son moteur
+**une fois** et sert plusieurs demandes : le bookmaker tapé dans le formulaire
+n'arrivait nulle part, et le meilleur prix du marché sortait à sa place — un
+prix que l'opérateur ne peut pas prendre.
+
+```
+AVANT   formulaire « Pinnacle »  →  prix retenu 1.90 chez Betclic
+APRÈS   formulaire « Pinnacle »  →  prix retenu 1.75 chez Pinnacle
+        (sans bookmaker saisi     →  1.90 chez Betclic, le meilleur ; inchangé)
+```
+
+`prefer` traverse le protocole, `best_prices` en fait l'arbitre, et un livre qui
+ne cote pas la compétition est **nommé** avec ceux chez qui les prix ont été pris.
+
+### 17.3 Contrôle des connexions — quatrième bouton, et commande
+
+`foot controle` et le bouton **Contrôles** appellent les services, dans l'ordre
+des causes :
+
+1. **les clés d'abord**, sans rencontre et sans crédit — `/status` chez
+   API-Football (formule et requêtes du jour), l'en-tête `x-requests-remaining`
+   chez The Odds API, dont la liste `/sports` ne coûte rien ;
+2. **la rencontre** : le parcours Analyser est exécuté pour de vrai, en direct ;
+3. **chaque famille** sur cette rencontre : xG, absences, compositions, cotes ;
+4. **le bookmaker** : les prix revenus sont redépartagés avec celui du
+   formulaire, et la ligne dit combien de marchés il a réellement emportés ;
+5. **Suivre et Bilan** : mécanisme prévu, prévision journalisable.
+
+Cinq verdicts distincts, jamais confondus : `●` obtenu, `◐` répondu sans la
+donnée, `✗` refusé (clé ou quota), `○` injoignable, `·` clé absente. Un `◐` sur
+les compositions trois jours avant le match est la réponse correcte, pas une
+panne — et un écran qui appellerait cela « prêt » dirait à l'opérateur ce qu'il
+veut entendre : `ready` exige `●` partout.
+
+Les quotas affichés sont **mesurés** : ils viennent du service, jamais d'une
+page tarifaire. Un compteur illisible est rapporté illisible, jamais remplacé
+par zéro.
+
+### 17.4 Aucune clé, nulle part — deux fuites réelles, fermées
+
+Le protocole exige qu'aucune clé n'apparaisse dans le dépôt, les conversations,
+les erreurs affichées ou les journaux. Deux chemins la laissaient passer, tous
+deux hors de portée d'un simple nettoyage à l'affichage :
+
+| Fuite | Où | Fermeture |
+|---|---|---|
+| `urllib` met l'URL dans l'exception qu'il lève, et l'URL porte `apiKey=…` | tout message d'erreur d'un fournisseur qui s'authentifie par requête | `redact_url()` au moment où le message est construit, pour **tous** les adaptateurs |
+| Le cache écrivait l'URL complète dans son fichier JSON | le disque du serveur, donc toute sauvegarde de ce disque | la clé de lecture reste l'URL entière (un condensé SHA-256) ; l'URL **lisible** est écrite masquée |
+
+```
+AVANT   .foot-cache/8f2…json → "url": "https://…/odds?apiKey=a1b2c3d4e5f6…&regions=eu"
+APRÈS   .foot-cache/8f2…json → "url": "https://…/odds?apiKey=[masquée]&regions=eu"
+```
+
+`scrub()` reste en second rideau sur l'écran de contrôle. Un test parcourt tout
+le dépôt et échoue si une valeur en forme de clé y apparaît.
+
+### 17.5 Les suivis reprennent après un redémarrage
+
+C'était la limite nommée au §13.4. Un hébergeur redémarre le service à chaque
+déploiement : un suivi perdu, c'est le contrôle de T−75 qui n'a pas lieu.
+
+Chaque suivi est écrit **avant** que son fil ne démarre, dans un fichier en ajout
+seul (`WatchStore`). Au démarrage suivant :
+
+| Situation | Ce qui se passe | Ce que l'écran dit |
+|---|---|---|
+| coup d'envoi encore devant | le suivi **repart**, avec ses contrôles restants | « repris après redémarrage » |
+| coup d'envoi passé pendant l'arrêt | rien n'est relancé | **« MANQUÉ »** : le contrôle n'a pas eu lieu |
+| aucun fichier configuré | rien n'est repris | la limite, et l'option qui la lève |
+
+Vérifié sur un serveur réel, pas seulement en test : lancé, arrêté, relancé sur
+le même fichier.
+
+```
+Suivis conservés dans /var/foot/suivis.jsonl : 1 repris, 0 manqué(s) pendant l'arrêt.
+
+1 suivi(s) côté serveur :
+Napoli - Bologna 20/09/2026 20:45 — 49e29015 · repris après redémarrage
+```
+
+### 17.6 Un défaut trouvé en rédigeant le guide
+
+En vérifiant quelles rubriques rester incomplètes avec une clé qui fonctionne,
+la grille affichait pour R08, R09, R12 et R14 :
+
+```
+AVANT   ✗ · R12 Entraîneur… (non développé : aucun adaptateur écrit pour : compositions)
+```
+
+C'est faux, et faux d'une manière coûteuse : les compositions **arrivent** — R10
+et R21 sont renseignées par elles dans la même analyse. L'opérateur qui vient de
+payer son abonnement lit que son adaptateur n'existe pas, et cherche un problème
+de clé qu'il n'a pas. Ces quatre rubriques ne déclarent aucun adaptateur et aucun
+import : ce qui manque est le **traitement**, et la rubrique dit déjà ce qu'il
+faudrait.
+
+```
+APRÈS   ✗ · R12 Entraîneur… (non développé : aucun traitement n'est écrit pour
+        cette rubrique — nécessite la composition et le dispositif annoncés)
+```
+
+La phrase s'arrête là volontairement : « aucune source ne sert cela » serait une
+affirmation de trop, puisque la feuille de match, elle, arrive.
+
+### 17.7 Hébergement : ce qui est fourni, ce qui est payant
+
+`render.yaml` décrit le service ; il n'engage rien tant que Render n'a pas été
+confirmé à l'écran.
+
+| Exigence | Comment | Vérifié par |
+|---|---|---|
+| HTTPS | fourni par Render sur `*.onrender.com` ; `--https-en-amont` évite un avertissement faux | serveur réel |
+| Accès privé | `FOOT_JETON`, tiré au hasard par Render, jamais dans le dépôt | test : 403 sans jeton, 200 avec |
+| Clés saisies chez l'hébergeur | `sync: false` — Render demande la valeur et la garde chiffrée | test sur le fichier |
+| Journal, cache et suivis persistants | disque de 1 Go monté sur `/var/foot` | test : les trois chemins sont sous le point de montage |
+| Sauvegarde récupérable | trois fichiers texte, copiés depuis l'onglet Shell | [INSTALLER.md](INSTALLER.md) |
+| Coût annoncé avant validation | **≈ 7,25 $/mois** détaillé ligne par ligne | [COUTS.md](COUTS.md) § 2 bis |
+
+Et une protection ajoutée : servir sur une adresse publique **sans** jeton est
+refusé au démarrage, avec la commande qui corrige. Le jeton n'est imprimé en
+clair que sur `127.0.0.1` — sur un hébergeur, la console devient le journal du
+fournisseur, et le jeton y resterait.
+
+**Réserve sur le montant.** L'environnement où ce code a été écrit n'atteint pas
+la page tarifaire de Render : les 7,00 $ de l'instance et les 0,25 $ du disque
+sont annoncés de mémoire, et c'est **l'écran de Render au moment de valider** qui
+fait foi. C'est écrit dans COUTS.md, pas seulement ici.
+
+### 17.8 Rubriques encore incomplètes, après ces deux abonnements
+
+| Rubrique | État affiché | Raison |
+|---|---|---|
+| R08, R09, R14 | `non développé` | demandent les événements horodatés d'un match ; API-Football Pro sert des totaux |
+| R12 | `non développé` | la feuille arrive ; le dispositif et l'entraîneur, non, et aucun traitement ne les lit |
+| R15 | `développé mais inaccessible` | adaptateur écrit ; football-data.co.uk injoignable **depuis cet environnement** — à retester depuis Render |
+| R07 | `partielle` | les xG arrivent ; npxG, tirs, grosses occasions et qualité des tirs ne sont pas tous servis — `Contrôles` mesure lesquels, compte par compte |
+
+17 rubriques sur 22 renseignées avec les deux clés, mesuré sur une analyse
+complète et non déduit d'un tableau.
+
+### 17.9 Vérifications
+
+```
+python3 tests/run_tests.py --sans-reseau
+                             492 réussi(s), 0 échec(s), 1 ignoré(s) sur 493
+ruff check .                 propre
+mypy .                       propre
+```
+
+Serveur réel, démarré avec la commande exacte du blueprint : refus sans jeton
+(403), page servie avec jeton (200), les quatre boutons, suivi écrit, serveur
+arrêté et relancé, suivi repris.
+
+Le protocole est conservé : dossier sportif scellé avant toute lecture de cote,
+coupure de disponibilité inchangée, note sur 100 jamais convertie en probabilité,
+aucun pari placé, aucun capital supposé. Aucune fusion vers `main` n'est faite
+dans ce lot.

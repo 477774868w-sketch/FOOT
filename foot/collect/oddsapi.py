@@ -30,7 +30,7 @@ import datetime as dt
 import os
 import re
 import urllib.parse
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -291,7 +291,15 @@ def _hide_key(message: str, key: str) -> str:
 class OddsApiProvider:
     """Pre-match prices from The Odds API, for an account that has a key."""
 
-    __slots__ = ("_bookmaker", "_cache", "_key", "_regions", "_timeout")
+    __slots__ = (
+        "_bookmaker",
+        "_cache",
+        "_fetch",
+        "_fetch_headers",
+        "_key",
+        "_regions",
+        "_timeout",
+    )
 
     def __init__(
         self,
@@ -301,12 +309,21 @@ class OddsApiProvider:
         bookmaker: str = "",
         regions: str = "eu",
         timeout: float = 20.0,
+        fetch: Callable[..., tuple[object, dt.datetime]] | None = None,
+        fetch_headers: Callable[..., tuple[object, dt.datetime, Mapping[str, str]]]
+        | None = None,
     ) -> None:
         self._cache = cache
         self._key = key if key is not None else os.environ.get(CREDENTIAL, "")
         self._bookmaker = bookmaker
         self._regions = regions
         self._timeout = timeout
+        # Injected the same way as the sport adapter's: a test that has to reach
+        # into module globals to stand in for the network is testing the patch
+        # as much as the code, and cannot run two adapters differently in the
+        # same process.
+        self._fetch = fetch or fetch_json
+        self._fetch_headers = fetch_headers or fetch_json_headers
 
     @property
     def name(self) -> str:
@@ -368,7 +385,7 @@ class OddsApiProvider:
                     ),
                     cached.retrieved_at,
                 )
-        payload, retrieved = fetch_json(url, timeout=self._timeout)
+        payload, retrieved = self._fetch(url, timeout=self._timeout)
         if self._cache is not None:
             self._cache.store(url, payload, retrieved)
         return (
@@ -398,7 +415,9 @@ class OddsApiProvider:
         query = urllib.parse.urlencode({"apiKey": self._key})
         url = f"{_BASE}/sports?{query}"
         try:
-            _payload, retrieved, headers = fetch_json_headers(url, timeout=self._timeout)
+            _payload, retrieved, headers = self._fetch_headers(
+                url, timeout=self._timeout
+            )
         except ProviderBlockedError as error:
             return QuotaReport(
                 provider=self.name,

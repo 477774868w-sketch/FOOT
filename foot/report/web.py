@@ -34,7 +34,7 @@ from foot.analysis.engine import AnalysisRun, Engine
 from foot.analysis.journey import JourneyResult, run_journey
 from foot.analysis.ledgerbook import ForecastBook, record_run
 from foot.analysis.request import DEFAULT_TIMEZONE, parse_requests, resolve_timezone
-from foot.analysis.supervisor import LedgerJob, Supervisor
+from foot.analysis.supervisor import LedgerJob, Supervisor, WatchStore
 from foot.collect.cache import Cache
 from foot.collect.supplements import SupplementSet
 from foot.markets.portfolio import build_ticket, plan_stakes
@@ -725,6 +725,9 @@ def serve(
     watch_engine: Engine | None = None,
     measurement: Callable[[LedgerJob], str] | None = None,
     cache: Cache | None = None,
+    watch_store: WatchStore | None = None,
+    public_url: str = "",
+    behind_tls: bool = False,
 ) -> None:
     """Run the interface until interrupted.
 
@@ -736,6 +739,11 @@ def serve(
     ``certfile``/``keyfile``
         HTTPS. A token sent over plain HTTP is a token given away, so the
         announcement says so plainly when TLS is off and the host is not local.
+        ``behind_tls`` says the opposite case out loud: a managed host that
+        terminates TLS at its edge leaves this process speaking plain HTTP on a
+        private network, and warning about a plaintext token there would be
+        false. It is a claim the caller makes, not something detected — so it is
+        an explicit flag and never a default.
     ``book``
         server-side storage of every analysis served, so the phone holds none
         of the state. It is a plain append-only file: backing it up is copying
@@ -747,9 +755,15 @@ def serve(
         for six hours; sharing one engine made the T−60 check replay T−75's
         answer.
 
+    ``watch_store``
+        where the watches are written down. With it, a restart of the server —
+        a deployment, a host putting the instance to sleep — **resumes** the
+        watches whose kick-off is still ahead, and declares « manqué » the ones
+        whose kick-off went by while it was down. Without it, a restart loses
+        them, and the page says so rather than implying otherwise.
+
     The **Suivre** button starts its watch on the server, so the T−75 check
-    happens whether or not the tab is still open. A watch does not survive a
-    restart of the server, and the page says so rather than implying otherwise.
+    happens whether or not the tab is still open.
 
     API keys never reach the browser in any configuration: the engine reads
     them from the server's own environment, and no page template renders them.
@@ -760,7 +774,10 @@ def serve(
         daemon_threads = True
 
     scheme = "https" if certfile and keyfile else "http"
-    supervisor = Supervisor(engine, book=book, watch_engine=watch_engine)
+    supervisor = Supervisor(
+        engine, book=book, watch_engine=watch_engine, store=watch_store
+    )
+    resumed, missed = supervisor.resume()
     handler = make_handler(
         engine,
         token=token,
@@ -774,19 +791,39 @@ def serve(
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(certfile=str(certfile), keyfile=str(keyfile))
             httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
-        suffix = f"/?jeton={token}" if token else "/"
-        announce(
-            f"Interface disponible sur {scheme}://{host}:{port}{suffix}"
-            f"  (Ctrl+C pour arrêter)"
-        )
-        if token and scheme == "http" and host not in {"127.0.0.1", "localhost"}:
+        local = host in {"127.0.0.1", "localhost"} and not public_url
+        base = public_url.rstrip("/") or f"{scheme}://{host}:{port}"
+        if not token:
+            announce(f"Interface disponible sur {base}/  (Ctrl+C pour arrêter)")
+        elif local:
+            # Your own terminal: printing the token is the fastest way to open
+            # the page, and nobody else reads this console.
+            announce(f"Interface disponible sur {base}/?jeton={token}")
+        else:
+            # A hosted instance keeps its console in the provider's log, which
+            # outlives the session and is read by whoever can see the dashboard.
+            # The address goes there; the token stays where it was set.
+            announce(
+                f"Interface disponible sur {base}/?jeton=VOTRE_JETON — "
+                f"remplacez VOTRE_JETON par la valeur de la variable "
+                f"d'environnement qui le porte. Elle n'est pas recopiée ici."
+            )
+        if token and scheme == "http" and not behind_tls and not local:
             announce(
                 "ATTENTION : jeton transmis en clair. Sur un réseau non local, "
-                "fournissez un certificat (--certificat/--cle) ou placez le "
-                "service derrière un reverse proxy HTTPS."
+                "fournissez un certificat (--certificat/--cle), placez le "
+                "service derrière un reverse proxy HTTPS, ou — si c'est déjà le "
+                "cas — démarrez-le avec --https-en-amont."
             )
         if book is not None:
             announce(f"Analyses conservées dans {book.path} (ajout seul).")
+        if watch_store is not None:
+            announce(
+                f"Suivis conservés dans {watch_store.path} : "
+                f"{len(resumed)} repris, {len(missed)} manqué(s) pendant l'arrêt."
+            )
+            for handle in missed:
+                announce(f"  MANQUÉ : {handle.matches.strip().splitlines()[0][:60]}")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

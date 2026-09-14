@@ -279,13 +279,16 @@ def test_an_unreachable_source_blocks_its_rubrics_without_inventing_data() -> No
     assert unavailable, "aucune rubrique marquée indisponible alors que xG et compositions manquent"
     # The blocker states *which* situation applies, so the operator can tell
     # "never written" from "written but wants a key" from "written but the
-    # network is closed" from "supply it yourself". Four different next moves,
-    # named, rather than one word covering all of them.
+    # network is closed" from "supply it yourself" from "the data arrives and
+    # nothing reads it". Five different next moves, named, rather than one word
+    # covering all of them — and the last one matters most to someone paying for
+    # a key: it says the key is not the problem.
     for assessment in unavailable:
         assert any(
             marker in assessment.blocker
             for marker in (
                 "aucun adaptateur écrit",
+                "aucun traitement n'est écrit",
                 "adaptateur à écrire",
                 "clé à fournir",
                 "accès réseau à ouvrir",

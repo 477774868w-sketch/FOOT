@@ -35,7 +35,7 @@ from foot.analysis.engine import Engine, EngineConfig
 from foot.analysis.ledgerbook import Forecast, ForecastBook
 from foot.analysis.measure import ClosingState, closing_key, measure
 from foot.analysis.quotes import offer_for_key
-from foot.analysis.supervisor import Supervisor, WatchHandle
+from foot.analysis.supervisor import Supervisor, WatchHandle, WatchStore
 from foot.analysis.watch import (
     WATCH_CACHE_TTL,
     WatchPlan,
@@ -760,11 +760,25 @@ def test_g11b_a_watch_that_fails_says_so_instead_of_looking_idle() -> None:
 
 
 def test_g11c_an_idle_supervisor_states_what_it_does_and_does_not_promise() -> None:
+    """La limite du moment doit être écrite, jamais sous-entendue.
+
+    Elle a changé depuis que les suivis peuvent être écrits sur disque : sans
+    fichier de suivis, un redémarrage les perd — et l'écran doit le dire, avec
+    l'option qui le corrige. Avec un fichier, c'est la reprise qui est annoncée,
+    et son exception (« manqué ») avec elle.
+    """
     rendered = Supervisor(_engine()).render()
     assert "continue même si vous fermez l'onglet" in rendered
-    assert "s'arrête si le serveur s'arrête" in rendered, (
+    assert "redémarrage du serveur perd les suivis" in rendered, (
         "la limite doit être écrite, pas sous-entendue"
     )
+    assert "--suivis" in rendered, "l'écran doit dire ce qui la lève"
+
+    with tempfile.TemporaryDirectory() as folder:
+        store = WatchStore(Path(folder) / "suivis.jsonl")
+        durable = Supervisor(_engine(), store=store).render()
+    assert "reprend" in durable
+    assert "manqué" in durable, "l'exception à la reprise doit être écrite aussi"
 
 
 def test_g11d_the_bilan_screen_shows_the_journal_and_how_to_restore_it() -> None:

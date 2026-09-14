@@ -5,7 +5,9 @@ A rigorous football (soccer) modelling engine in pure Python. **No dependencies.
 > **Système d'analyse de rencontres (français)** — collecte réelle, dossier
 > sportif scellé avant lecture des cotes, grille des 22 rubriques, comparaison
 > des marchés et une décision par rencontre :
-> **[TELEPHONE.md](TELEPHONE.md)** pour le parcours depuis un téléphone, une
+> **[INSTALLER.md](INSTALLER.md)** pour l'installer sur son téléphone en neuf
+> étapes, hébergement compris ; **[TELEPHONE.md](TELEPHONE.md)** pour le parcours
+> quotidien depuis un téléphone, une
 > page, **sans aucune commande quotidienne** ; **[COUTS.md](COUTS.md)** pour ce
 > que coûterait la suite, avant tout engagement ; **[GUIDE.md](GUIDE.md)** pour l'utilisation complète ;
 > **[AUDIT.md](AUDIT.md)** pour la correspondance avec le protocole, l'état
@@ -16,8 +18,18 @@ A rigorous football (soccer) modelling engine in pure Python. **No dependencies.
 > $ python3 -m foot web --jeton --journal   # interface privée, analyses conservées
 > $ python3 -m foot analyser "it.1 | Napoli - Bologna | 1.62 4.00 5.50"
 > $ python3 -m foot suivre "…" --coup-denvoi 2026-09-13T20:45  # contrôle T−75/T−60
+> $ python3 -m foot controle "Napoli - Bologna 20/09/2026 20:45"  # les services répondent-ils ?
 > $ python3 -m foot config       # quelles clés sont posées, et ce qu'elles coûtent
 > ```
+>
+> **Hébergement (facultatif, payant).** `render.yaml` décrit un service privé,
+> en HTTPS, dont le journal, le cache et les suivis vivent sur un disque
+> persistant — un redémarrage reprend les suivis au lieu de les perdre. Le coût
+> exact, ligne par ligne, est au § 2 bis de [COUTS.md](COUTS.md) : **≈ 7,25
+> $/mois**, à confirmer sur l'écran de Render avant de valider. Rien n'est
+> engagé par ce dépôt.
+>
+> [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/477774868w-sketch/FOOT/tree/claude/code-masterpiece-o2mbbl)
 
 `foot` fits Dixon-Coles and Poisson goal models by maximum likelihood with
 hand-derived analytic gradients, rates teams with Elo, reads the betting market,

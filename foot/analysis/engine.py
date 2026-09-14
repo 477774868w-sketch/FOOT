@@ -1383,11 +1383,7 @@ class Engine:
                         or f"aucune source automatique ; fournissez la donnée via "
                         f"{rubric.operator_import}"
                     ),
-                }.get(
-                    implementation,
-                    "aucun adaptateur écrit pour : "
-                    + ", ".join(sorted(c.value for c in gap)),
-                )
+                }.get(implementation, _not_built_reason(rubric, gap))
                 assessments.append(
                     RubricAssessment(
                         rubric=rubric,
@@ -2187,6 +2183,29 @@ def _effective_cut(
     """
     observed = [item.retrieved_at for item in collected if item.retrieved_at]
     return max([requested, *observed]) if observed else requested
+
+
+def _not_built_reason(rubric: Rubric, gap: frozenset[Capability]) -> str:
+    """Why nothing answers this rubric, in terms the operator can act on.
+
+    Naming the missing *capability* is right when a key would fix it, and wrong
+    when nothing would. Four rubrics need something no plan in the catalogue
+    sells — the timed event feed of a match, or an announced formation — and
+    they share their capability with data that *does* arrive: « aucun adaptateur
+    écrit pour : statistiques avancées » is then read as « your key is not
+    working », while the key works and delivers exactly what it sells.
+
+    So when the rubric names no adapter and no operator import, what is missing
+    is the treatment, and what it would take is what the rubric itself states.
+    The sentence stops there on purpose: « aucune source ne sert cela » would be
+    one claim too many — for R12 the team sheet does arrive, and only the
+    formation and the coach do not.
+    """
+    if not rubric.adapter and not rubric.operator_import and rubric.treatment:
+        return f"aucun traitement n'est écrit pour cette rubrique — {rubric.treatment}"
+    return "aucun adaptateur écrit pour : " + ", ".join(
+        sorted(c.value for c in gap)
+    )
 
 
 _FAMILY_BY_CAPABILITY: Mapping[Capability, str] = {

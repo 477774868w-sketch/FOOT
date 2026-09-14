@@ -23,7 +23,7 @@ from foot.analysis.ledgerbook import DEFAULT_BOOK, ForecastBook, record_run
 from foot.analysis.measure import ClosingPrices, measure, measure_journal
 from foot.analysis.request import DEFAULT_TIMEZONE, resolve_timezone
 from foot.analysis.rubrics import RUBRICS
-from foot.analysis.supervisor import LedgerJob
+from foot.analysis.supervisor import DEFAULT_WATCHES, LedgerJob, WatchStore
 from foot.analysis.watch import WATCH_CACHE_TTL, WatchPlan, watch_until_kickoff
 from foot.collect import (
     Cache,
@@ -836,6 +836,15 @@ def command_web(args: argparse.Namespace) -> int:
     token = args.jeton
     if token == "auto":
         token = access_token()
+    if not token and args.hote not in {"127.0.0.1", "localhost"}:
+        # An address anyone can reach, serving a form anyone can submit, is not
+        # a default worth having: the operator has to say he wants it.
+        raise ValueError(
+            f"servir sur {args.hote} sans jeton exposerait l'interface à qui "
+            f"atteint le port. Ajoutez « --jeton » (un jeton est tiré au "
+            f"hasard), ou « --jeton VALEUR » pour en imposer un. Pour un essai "
+            f"strictement local, utilisez « --hote 127.0.0.1 »."
+        )
     serve(
         engine,
         host=args.hote,
@@ -845,6 +854,9 @@ def command_web(args: argparse.Namespace) -> int:
         keyfile=args.cle or "",
         book=ForecastBook(args.journal) if args.journal else None,
         cache=_build_cache(args),
+        watch_store=WatchStore(args.suivis) if args.suivis else None,
+        public_url=args.url_publique or "",
+        behind_tls=args.https_en_amont,
         watch_engine=_watch_engine(args),
         measurement=_measurement_task(args, engine)
         if args.journal
@@ -1309,6 +1321,17 @@ def build_parser() -> argparse.ArgumentParser:
         const="auto",
         help="exiger un jeton d'accès ; « --jeton » seul en tire un au hasard",
     )
+    web.add_argument(
+        "--url-publique",
+        metavar="ADRESSE",
+        help="adresse publique à annoncer (ex. celle fournie par l'hébergeur)",
+    )
+    web.add_argument(
+        "--https-en-amont",
+        action="store_true",
+        help="le HTTPS est assuré par un proxy devant ce service ; sans cette "
+        "option, un jeton servi en clair déclenche un avertissement",
+    )
     web.add_argument("--certificat", help="certificat TLS (active HTTPS)")
     web.add_argument("--cle", help="clé privée TLS correspondante")
     web.add_argument(
@@ -1316,6 +1339,14 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         const=str(DEFAULT_BOOK),
         help="conserver chaque analyse servie côté serveur (bouton « Bilan »)",
+    )
+    web.add_argument(
+        "--suivis",
+        nargs="?",
+        const=str(DEFAULT_WATCHES),
+        metavar="FICHIER",
+        help="écrire les suivis lancés depuis la page, pour qu'un redémarrage "
+        "du serveur les reprenne au lieu de les perdre",
     )
     _data_options(web)
     web.set_defaults(handler=command_web)

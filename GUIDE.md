@@ -269,7 +269,8 @@ Extrait de la fiche :
 | Commande | Rôle |
 |---|---|
 | `foot analyser` | le parcours principal : rencontres → décisions |
-| `foot web` | la même chose dans le navigateur, en français ; `--jeton` pour un accès privé, `--certificat`/`--cle` pour HTTPS |
+| `foot web` | la même chose dans le navigateur, en français ; `--jeton` pour un accès privé, `--certificat`/`--cle` pour HTTPS, `--suivis` pour que les suivis survivent à un redémarrage |
+| `foot controle` | appelle réellement chaque service configuré sur une rencontre et dit, famille par famille, ce qui revient — avec vos quotas restants. Sans clé, aucune requête n'est faite : la ligne dit « clé absente » |
 | `foot suivre` | exécute le contrôle T−75/T−60 et réessaie jusqu'au coup d'envoi |
 | `foot journal` | relit les prévisions écrites avant match, jamais réécrites |
 | `foot mesurer` | apparie le journal aux résultats et le note — **sans rien y réécrire** |
@@ -279,6 +280,19 @@ Extrait de la fiche :
 | `foot fournisseurs` | sonde chaque source ; `--couverture` ajoute coût et accès réel |
 | `foot rubriques` | la grille des 22 rubriques et ce que chacune exige |
 | `foot valider` | validation chronologique sur données réelles |
+
+Options utiles de `web`, pour un hébergement :
+
+| Option | Effet |
+|---|---|
+| `--jeton [VALEUR]` | exige un jeton ; seul, il en tire un au hasard. **Obligatoire dès que l'hôte n'est pas `127.0.0.1`** : servir publiquement sans jeton est refusé au démarrage |
+| `--suivis [fichier]` | écrit les suivis ; au démarrage suivant, ceux dont le coup d'envoi est devant repartent, les autres sont marqués « manqué » |
+| `--https-en-amont` | le TLS est assuré par un proxy devant le service (cas des hébergeurs gérés) : sans cette option, un avertissement « jeton en clair » s'affiche à tort |
+| `--url-publique ADRESSE` | l'adresse à annoncer au démarrage, quand elle n'est pas celle du socket |
+
+Un service prêt à l'emploi (HTTPS, disque persistant, clés saisies chez
+l'hébergeur) est décrit dans `render.yaml` ; la marche à suivre, en neuf étapes,
+est dans [INSTALLER.md](INSTALLER.md).
 
 Options utiles de `analyser` :
 

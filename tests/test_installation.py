@@ -36,7 +36,8 @@ from test_regression_review8 import Clock, _fetcher
 
 from foot.analysis.diagnostics import Outcome, run_checks, scrub
 from foot.analysis.engine import Engine, EngineConfig
-from foot.collect import oddsapi
+from foot.analysis.supervisor import Supervisor, WatchStore
+from foot.cli import build_parser, command_web
 from foot.collect.apifootball import ApiFootballProvider
 from foot.collect.base import (
     CollectionError,
@@ -107,13 +108,13 @@ def _odds_payload(home: str = "Club A", away: str = "Club B") -> list[dict[str, 
     ]
 
 
-@contextmanager
-def _odds_service(
+def _odds_fetchers(
     *,
     quota_headers: dict[str, str] | None = None,
     calls: list[str] | None = None,
-) -> Iterator[None]:
-    """Stand in for The Odds API at the HTTP boundary, key included."""
+) -> dict[str, Any]:
+    """Stand in for The Odds API at the adapter's own boundary, key included."""
+
     def fake_json(url: str, **_kwargs: Any) -> tuple[object, dt.datetime]:
         if calls is not None:
             calls.append(url)
@@ -127,19 +128,12 @@ def _odds_service(
         return (
             [],
             dt.datetime(2026, 9, 13, 10, 5, tzinfo=UTC),
-            quota_headers if quota_headers is not None
+            quota_headers
+            if quota_headers is not None
             else {"x-requests-remaining": "473", "x-requests-used": "27"},
         )
 
-    module = oddsapi
-
-    before = (module.fetch_json, module.fetch_json_headers)
-    module.fetch_json = fake_json  # type: ignore[assignment]
-    module.fetch_json_headers = fake_headers  # type: ignore[assignment]
-    try:
-        yield
-    finally:
-        module.fetch_json, module.fetch_json_headers = before  # type: ignore[assignment]
+    return {"fetch": fake_json, "fetch_headers": fake_headers}
 
 
 @contextmanager
@@ -176,9 +170,19 @@ def _api_football(clock: Clock, fetch: Callable[..., Any] | None = None) -> Any:
     def answering(url: str, **kwargs: Any) -> tuple[object, dt.datetime]:
         if "/status" in url and fetch is None:
             return (_status_payload(), clock.t)
-        return inner(url, **kwargs)  # type: ignore[no-any-return]
+        answer: tuple[object, dt.datetime] = inner(url, **kwargs)
+        return answer
 
     return ApiFootballProvider(None, token=SECRET, now=clock.now, fetch=answering)
+
+
+def _odds_provider(**kwargs: Any) -> OddsApiProvider:
+    """The adapter, answering from recorded payloads and recorded headers."""
+    fetchers = _odds_fetchers(
+        quota_headers=kwargs.pop("quota_headers", None),
+        calls=kwargs.pop("calls", None),
+    )
+    return OddsApiProvider(None, key=SECRET, **fetchers, **kwargs)
 
 
 def _engine(clock: Clock, *, with_api: bool = True, odds: bool = False) -> Engine:
@@ -187,19 +191,21 @@ def _engine(clock: Clock, *, with_api: bool = True, odds: bool = False) -> Engin
     if with_api:
         providers.append(_api_football(clock))
     if odds:
-        providers.append(OddsApiProvider(None, key=SECRET))
+        # The control screen interrogates **the engine's own** adapters, so
+        # putting the double here is what makes the check exercise the real path.
+        providers.append(_odds_provider())
     return Engine(
         Registry(providers),
         config=EngineConfig(seasons=("2026-27",), min_matches=40),
     )
 
 
-def _post(handler_class: type, form: dict[str, str]) -> str:
+def _post(handler_class: Any, form: dict[str, str]) -> str:
     """Drive one POST through the real handler, without a socket."""
     body = "&".join(f"{k}={v.replace(' ', '+')}" for k, v in form.items())
     captured: list[str] = []
 
-    class Fake(handler_class):  # type: ignore[misc, valid-type]
+    class Fake(handler_class):  # type: ignore[misc]
         def __init__(self) -> None:
             self.headers = {"Content-Length": str(len(body.encode("utf-8")))}
             self.path = "/"
@@ -211,7 +217,7 @@ def _post(handler_class: type, form: dict[str, str]) -> str:
             captured.append(page)
 
     fake = Fake()
-    fake.rfile = io.BytesIO(body.encode("utf-8"))  # type: ignore[attr-defined]
+    fake.rfile = io.BytesIO(body.encode("utf-8"))
     fake.do_POST()
     return captured[0]
 
@@ -240,7 +246,7 @@ def test_i1b_an_empty_date_field_runs_live_and_a_filled_one_replays() -> None:
 
     handler = make_handler(_engine(clock, with_api=False))
     before = web.analyse_form
-    web.analyse_form = spy  # type: ignore[assignment]
+    setattr(web, "analyse_form", spy)  # noqa: B010 - une doublure, le temps du test
     try:
         _post(handler, {"matchs": "Club A - Club B", "date": "", "action": "analyser"})
         _post(
@@ -252,7 +258,7 @@ def test_i1b_an_empty_date_field_runs_live_and_a_filled_one_replays() -> None:
             },
         )
     finally:
-        web.analyse_form = before  # type: ignore[assignment]
+        setattr(web, "analyse_form", before)  # noqa: B010
     assert seen == [True, False], seen
 
 
@@ -270,15 +276,13 @@ def test_i1c_the_page_offers_the_four_actions() -> None:
 def test_i2_the_form_bookmaker_reaches_the_provider_and_decides() -> None:
     """Betclic est plus cher : sans transmission, c'est lui qui sortirait."""
     fixture = Fixture("Club A", "Club B", MATCH, competition="it.1")
-    provider = OddsApiProvider(None, key=SECRET)  # aucun bookmaker à la construction
-    with _odds_service():
-        chosen = provider.market_prices(fixture, prefer="Pinnacle")
+    provider = _odds_provider()  # aucun bookmaker à la construction
+    chosen = provider.market_prices(fixture, prefer="Pinnacle")
     price, _hour, book = chosen["1X2:H"]
     assert book == "Pinnacle", f"le bookmaker demandé n'a pas décidé : {book}"
     assert price == 1.75, price
 
-    with _odds_service():
-        free = provider.market_prices(fixture)
+    free = provider.market_prices(fixture)
     assert free["1X2:H"][2] == "Betclic", "sans préférence, le meilleur prix gagne"
 
 
@@ -299,7 +303,7 @@ def test_i2b_the_engine_passes_the_run_bookmaker_to_the_market_source() -> None:
 
     clock = Clock()
     engine = _engine(clock, with_api=False)
-    engine._market_sources = (Spy(),)  # type: ignore[attr-defined]
+    setattr(engine, "_market_sources", (Spy(),))  # noqa: B010 - doublure
     engine.run(LINE, as_of=dt.datetime(2026, 9, 13, 12, 0, tzinfo=PARIS),
                bookmaker="Pinnacle", live=False)
     assert seen and all(book == "Pinnacle" for book in seen), seen
@@ -316,7 +320,7 @@ def _named(report: Any, name: str) -> Any:
 
 def test_i3_the_control_calls_each_family_and_reports_what_came_back() -> None:
     clock = Clock()
-    with _environment(API_FOOTBALL_KEY=SECRET, ODDS_API_KEY=SECRET), _odds_service():
+    with _environment(API_FOOTBALL_KEY=SECRET, ODDS_API_KEY=SECRET):
         report = run_checks(
             _engine(clock, odds=True),
             fixture_line=LINE,
@@ -448,17 +452,19 @@ def test_i4c_no_check_report_ever_prints_a_key() -> None:
         clock.tick()
         raise ProviderBlockedError(f"{url} : HTTP 401 — accès refusé")
 
+    providers: list[Any] = [
+        StubProvider(
+            _controlled_history(),
+            [Fixture("Club A", "Club B", MATCH, competition="it.1")],
+        ),
+        _api_football(clock, refusing),
+        _odds_provider(),
+    ]
     engine = Engine(
-        Registry([
-            StubProvider(
-                _controlled_history(),
-                [Fixture("Club A", "Club B", MATCH, competition="it.1")],
-            ),
-            _api_football(clock, refusing),
-        ]),
+        Registry(providers),
         config=EngineConfig(seasons=("2026-27",), min_matches=40),
     )
-    with _environment(API_FOOTBALL_KEY=SECRET, ODDS_API_KEY=SECRET), _odds_service():
+    with _environment(API_FOOTBALL_KEY=SECRET, ODDS_API_KEY=SECRET):
         report = run_checks(engine, fixture_line=LINE, bookmaker="Pinnacle")
     rendered = report.render()
     assert SECRET not in rendered, "une clé est apparue dans le contrôle"
@@ -506,16 +512,16 @@ def test_i4d_no_key_is_written_in_the_repository() -> None:
 
 
 def test_i5_the_odds_quota_is_read_from_the_service_headers() -> None:
-    with _odds_service(quota_headers={"x-requests-remaining": "12", "x-requests-used": "488"}):
-        quota = OddsApiProvider(None, key=SECRET).quota()
+    quota = _odds_provider(
+        quota_headers={"x-requests-remaining": "12", "x-requests-used": "488"}
+    ).quota()
     assert quota.remaining == 12
     assert quota.limit == 500
     assert "12" in quota.render()
 
 
 def test_i5b_a_service_that_publishes_no_quota_says_so_instead_of_zero() -> None:
-    with _odds_service(quota_headers={}):
-        quota = OddsApiProvider(None, key=SECRET).quota()
+    quota = _odds_provider(quota_headers={}).quota()
     assert quota.remaining is None and quota.used is None
     assert not quota.measured
     assert "pas renvoyé" in quota.render()
@@ -607,3 +613,273 @@ def test_i5h_parse_odds_still_reads_what_the_service_sends() -> None:
     assert {q.bookmaker for q in quotes} == {"Pinnacle", "Betclic"}
     with assert_raises(CollectionError):
         parse_odds({"pas": "une liste"}, competition="it.1")
+
+
+# --------------------------------------------------------------------------- #
+# 6. Les suivis reprennent après un redémarrage
+# --------------------------------------------------------------------------- #
+
+
+def _no_op(handle: Any) -> None:
+    """Stand in for the watch loop: the thread starts and ends immediately."""
+    _ = handle
+
+
+def test_i6_a_watch_is_written_down_the_moment_it_starts() -> None:
+    path = Path(tempfile.mkdtemp()) / "suivis.jsonl"
+    store = WatchStore(path)
+    clock = Clock()
+    supervisor = Supervisor(_engine(clock, with_api=False), store=store)
+    kickoff = dt.datetime.now(UTC) + dt.timedelta(hours=3)
+    supervisor.start(
+        matches="Club A - Club B 14/09/2026 20:45",
+        kickoff=kickoff,
+        bookmaker="Pinnacle",
+        runner=_no_op,
+    )
+    written = path.read_text(encoding="utf-8")
+    assert '"état": "lancé"' in written
+    assert "Pinnacle" in written
+    pending = store.pending()
+    assert len(pending) == 1
+    assert pending[0].kickoff == kickoff
+    assert pending[0].resumed, "une reprise se sait reprise"
+
+
+def test_i6b_a_restart_resumes_a_watch_whose_kickoff_is_still_ahead() -> None:
+    """Le serveur redémarre ; le contrôle T−75 doit repartir."""
+    path = Path(tempfile.mkdtemp()) / "suivis.jsonl"
+    kickoff = dt.datetime.now(UTC) + dt.timedelta(hours=3)
+    clock = Clock()
+    first = Supervisor(_engine(clock, with_api=False), store=WatchStore(path))
+    first.start(matches="Club A - Club B", kickoff=kickoff, runner=_no_op)
+
+    second = Supervisor(_engine(clock, with_api=False), store=WatchStore(path))
+    resumed, missed = second.resume()
+    assert len(resumed) == 1, "le suivi devait repartir"
+    assert not missed
+    assert resumed[0].resumed and not resumed[0].missed
+    assert "repris après redémarrage" in resumed[0].summary()
+    assert "redémarrage" in second.render()
+
+
+def test_i6c_a_kickoff_that_passed_during_the_outage_is_declared_missed() -> None:
+    """Un contrôle qui n'a pas eu lieu ne doit jamais s'afficher comme fait."""
+    path = Path(tempfile.mkdtemp()) / "suivis.jsonl"
+    kickoff = dt.datetime.now(UTC) + dt.timedelta(minutes=30)
+    clock = Clock()
+    first = Supervisor(_engine(clock, with_api=False), store=WatchStore(path))
+    first.start(matches="Club A - Club B", kickoff=kickoff, runner=_no_op)
+
+    second = Supervisor(_engine(clock, with_api=False), store=WatchStore(path))
+    resumed, missed = second.resume(now=kickoff + dt.timedelta(minutes=5))
+    assert not resumed
+    assert len(missed) == 1
+    summary = missed[0].summary()
+    assert "MANQUÉ" in summary
+    assert "Aucun contrôle n'a eu lieu" in summary
+    assert '"état": "manqué"' in path.read_text(encoding="utf-8")
+
+
+def test_i6d_resuming_twice_does_not_double_a_watch() -> None:
+    path = Path(tempfile.mkdtemp()) / "suivis.jsonl"
+    kickoff = dt.datetime.now(UTC) + dt.timedelta(hours=3)
+    clock = Clock()
+    supervisor = Supervisor(_engine(clock, with_api=False), store=WatchStore(path))
+    supervisor.start(matches="Club A - Club B", kickoff=kickoff, runner=_no_op)
+    again = Supervisor(_engine(clock, with_api=False), store=WatchStore(path))
+    again.resume()
+    resumed, missed = again.resume()
+    assert not resumed and not missed, "un suivi déjà tenu n'est pas relancé"
+    assert len(again.handles()) == 1
+
+
+def test_i6e_a_finished_watch_is_not_resumed() -> None:
+    path = Path(tempfile.mkdtemp()) / "suivis.jsonl"
+    kickoff = dt.datetime.now(UTC) + dt.timedelta(hours=3)
+    store = WatchStore(path)
+    clock = Clock()
+    supervisor = Supervisor(_engine(clock, with_api=False), store=store)
+    handle = supervisor.start(
+        matches="Club A - Club B", kickoff=kickoff, runner=_no_op
+    )
+    store.record(handle, "terminé")
+    assert store.pending() == ()
+
+
+def test_i6f_a_corrupt_line_costs_one_watch_not_the_file() -> None:
+    """Un arrêt brutal en pleine écriture ne doit pas perdre les autres suivis."""
+    path = Path(tempfile.mkdtemp()) / "suivis.jsonl"
+    kickoff = dt.datetime.now(UTC) + dt.timedelta(hours=3)
+    store = WatchStore(path)
+    clock = Clock()
+    supervisor = Supervisor(_engine(clock, with_api=False), store=store)
+    supervisor.start(matches="Club A - Club B", kickoff=kickoff, runner=_no_op)
+    with path.open("a", encoding="utf-8") as handle_file:
+        handle_file.write('{"identifiant": "tronq\n')
+    assert len(store.pending()) == 1
+
+
+def test_i6g_without_a_store_the_page_says_the_watches_are_lost() -> None:
+    """Ne rien promettre qu'on ne tienne : l'écran doit le dire."""
+    clock = Clock()
+    supervisor = Supervisor(_engine(clock, with_api=False))
+    assert supervisor.resume() == ((), ())
+    rendered = supervisor.render()
+    assert "perd les suivis" in rendered
+    assert "--suivis" in rendered
+
+
+# --------------------------------------------------------------------------- #
+# 7. Les rubriques incomplètes disent la vraie raison
+# --------------------------------------------------------------------------- #
+
+
+def test_i7_a_rubric_nothing_treats_does_not_blame_a_missing_key() -> None:
+    """Avec une clé qui fonctionne, « aucun adaptateur écrit » serait un faux aveu.
+
+    R08, R09, R12 et R14 partagent leur capacité avec des données qui arrivent
+    bel et bien : xG pour les trois premières, compositions pour R12. Leur
+    message doit donc porter sur le traitement manquant, jamais sur une clé —
+    sans quoi l'opérateur qui paie son abonnement croit qu'il ne marche pas.
+    """
+    clock = Clock()
+    with _environment(API_FOOTBALL_KEY=SECRET, ODDS_API_KEY=SECRET):
+        run = _engine(clock, odds=True).run(
+            LINE,
+            as_of=dt.datetime(2026, 9, 13, 12, 0, tzinfo=PARIS),
+            bookmaker="Pinnacle",
+            live=True,
+        )
+    by_number = {a.rubric.number: a for a in run.analyses[0].rubrics}
+    for number in (8, 9, 12, 14):
+        blocker = by_number[number].blocker
+        assert "aucun traitement n'est écrit" in blocker, f"R{number:02d} : {blocker}"
+        assert "adaptateur" not in blocker, f"R{number:02d} accuse une clé : {blocker}"
+        assert by_number[number].rubric.treatment in blocker, (
+            f"R{number:02d} doit dire ce qu'il faudrait : {blocker}"
+        )
+    # Et une rubrique réellement bloquée par le réseau continue de le dire.
+    assert "accès réseau à ouvrir" in by_number[15].blocker
+
+
+def test_i7b_a_blocked_rubric_still_affirms_nothing() -> None:
+    clock = Clock()
+    with _environment(API_FOOTBALL_KEY=SECRET, ODDS_API_KEY=SECRET):
+        run = _engine(clock, odds=True).run(
+            LINE, as_of=dt.datetime(2026, 9, 13, 12, 0, tzinfo=PARIS), live=True
+        )
+    for assessment in run.analyses[0].rubrics:
+        if assessment.blocker:
+            assert not assessment.summary, "une rubrique bloquée ne doit rien affirmer"
+
+
+# --------------------------------------------------------------------------- #
+# 8. La configuration Render décrit bien ce qu'elle promet
+# --------------------------------------------------------------------------- #
+
+
+def _blueprint() -> dict[str, Any]:
+    """Read render.yaml without a YAML library — the project has no dependency.
+
+    Only the handful of shapes this file uses are supported, which is the point:
+    the test must fail if the file stops looking like what it claims to be.
+    """
+    text = (Path(__file__).resolve().parent.parent / "render.yaml").read_text(
+        encoding="utf-8"
+    )
+    service: dict[str, Any] = {}
+    env_vars: list[dict[str, str]] = []
+    start: list[str] = []
+    in_start = in_disk = False
+    disk: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].rstrip() if not raw.strip().startswith("#") else ""
+        if not line.strip():
+            continue
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if in_start:
+            if indent >= 6 and ":" not in stripped:
+                start.append(stripped)
+                continue
+            in_start = False
+        if stripped.startswith("startCommand:"):
+            in_start = True
+            continue
+        if stripped.startswith("disk:"):
+            in_disk = True
+            continue
+        if stripped.startswith("envVars:"):
+            in_disk = False
+            continue
+        if stripped.startswith("- key:"):
+            env_vars.append({"key": stripped.split(":", 1)[1].strip()})
+            continue
+        if env_vars and stripped.startswith(("sync:", "generateValue:", "value:")):
+            name, _, value = stripped.partition(":")
+            env_vars[-1][name.strip()] = value.strip().strip('"')
+            continue
+        if ":" in stripped:
+            name, _, value = stripped.partition(":")
+            target = disk if in_disk else service
+            target[name.strip().lstrip("- ")] = value.strip().strip('"')
+    service["startCommand"] = " ".join(start)
+    service["envVars"] = env_vars
+    service["disk"] = disk
+    return service
+
+
+def test_i8_the_blueprint_puts_every_durable_file_on_the_persistent_disk() -> None:
+    service = _blueprint()
+    mount = service["disk"]["mountPath"]
+    command = service["startCommand"]
+    for option in ("--journal", "--suivis", "--cache"):
+        value = command.split(f"{option} ", 1)[1].split(" ", 1)[0]
+        assert value.startswith(mount), f"{option} n'est pas sur le disque : {value}"
+    assert int(service["disk"]["sizeGB"]) >= 1
+
+
+def test_i8b_the_blueprint_asks_render_for_the_keys_and_stores_none() -> None:
+    """« sync: false » : Render demande la valeur, le dépôt n'en garde rien."""
+    env = {entry["key"]: entry for entry in _blueprint()["envVars"]}
+    for name in ("API_FOOTBALL_KEY", "ODDS_API_KEY"):
+        assert env[name].get("sync") == "false", f"{name} doit être demandée à Render"
+        assert "value" not in env[name], f"{name} porte une valeur dans le dépôt"
+    assert env["FOOT_JETON"].get("generateValue") == "true"
+    assert "value" not in env["FOOT_JETON"], "le jeton ne doit pas être écrit ici"
+
+
+def test_i8c_the_blueprint_takes_the_plan_that_can_hold_a_disk() -> None:
+    """Le plan gratuit ne peut pas recevoir de disque : le dire, et le prendre."""
+    service = _blueprint()
+    assert service["plan"] == "starter", service["plan"]
+    assert service["branch"] == "claude/code-masterpiece-o2mbbl"
+
+
+def test_i8d_the_blueprint_serves_privately_and_says_tls_is_upstream() -> None:
+    command = _blueprint()["startCommand"]
+    assert "--jeton" in command, "une interface publique sans jeton est ouverte à tous"
+    assert "--https-en-amont" in command, (
+        "sans cette option, l'avertissement « jeton en clair » serait affiché à tort"
+    )
+    assert "$FOOT_JETON" in command
+
+
+def test_i8e_the_announced_cost_is_written_down_before_anything_is_bought() -> None:
+    costs = (Path(__file__).resolve().parent.parent / "COUTS.md").read_text(
+        encoding="utf-8"
+    )
+    assert "7,25" in costs, "le total mensuel doit être chiffré"
+    assert "7,00" in costs and "0,25" in costs, "le détail doit être ligne par ligne"
+    assert "c'est Render qui a raison" in costs, (
+        "le montant affiché par l'hébergeur doit primer sur ce document"
+    )
+
+
+def test_i8f_serving_publicly_without_a_token_is_refused() -> None:
+    """Une adresse publique sans jeton servirait le formulaire à qui l'atteint."""
+    parser = build_parser()
+    args = parser.parse_args(["web", "--hote", "0.0.0.0"])
+    with assert_raises(ValueError, match="sans jeton"):
+        command_web(args)
