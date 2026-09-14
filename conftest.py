@@ -55,7 +55,7 @@ def _is_loopback(address: object) -> bool:
     return False
 
 
-@pytest.fixture(autouse=True)  # type: ignore[untyped-decorator]
+@pytest.fixture(autouse=True)
 def _refuse_outbound_network(request: pytest.FixtureRequest) -> Iterator[None]:
     """Forbid outbound connections unless the test is marked ``network``."""
     if request.node.get_closest_marker("network") is not None:

@@ -71,3 +71,12 @@ disallow_any_explicit = false
 [[tool.mypy.overrides]]
 module = "pytest"
 ignore_missing_imports = true
+
+# conftest.py décore une fixture avec `@pytest.fixture`. Selon que pytest est
+# importable par mypy ou non, ce décorateur est typé ou vaut Any — si bien qu'un
+# `type: ignore` nécessaire dans un environnement est signalé comme inutile dans
+# l'autre. Désactiver la règle ici met les deux d'accord sans commentaire
+# conditionnel, qu'aucun outil ne peut écrire.
+[[tool.mypy.overrides]]
+module = "conftest"
+disallow_untyped_decorators = false
