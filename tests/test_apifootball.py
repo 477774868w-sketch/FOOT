@@ -34,6 +34,8 @@ from foot.collect.apifootball import (
     parse_injuries,
     parse_lineups,
     parse_statistics,
+    season_of,
+    season_year,
 )
 from foot.collect.base import (
     Capability,
@@ -187,7 +189,8 @@ def test_no_xg_row_is_produced_from_a_half_served_match() -> None:
         ),
     )
     fixture = Fixture("SSC Napoli", "Bologna FC 1909", MATCH_DAY, competition="it.1")
-    assert provider.xg_rows(fixture) == ()
+    rows, _evidence = provider.xg_rows([fixture])
+    assert rows == ()
 
 
 # --------------------------------------------------------------------------- #
@@ -360,8 +363,23 @@ def test_a_quota_message_is_a_refusal_too() -> None:
 
 
 def test_no_key_ever_reaches_a_report() -> None:
+    """Et la clé factice ne part nulle part : la réponse est injectée.
+
+    Ce test appelait le vrai service avec son faux jeton. Un essai « hors
+    réseau » qui ouvre une connexion n'est pas hors réseau, et celui-ci envoyait
+    en plus une clé dans un en-tête. Le garde-fou de ``conftest.py`` l'interdit
+    désormais ; la réponse est fournie ici.
+    """
     secret = "clé-très-secrète-0123456789"
-    provider = ApiFootballProvider(token=secret)
+    provider = ApiFootballProvider(
+        token=secret,
+        fetch=_recorded(
+            {
+                "fixtures/statistics": _statistics_payload(),
+                "fixtures": {"errors": [], "response": [{"fixture": {"id": 5}}]},
+            }
+        ),
+    )
     status = provider.probe()
     assert secret not in status.detail
     assert secret not in status.render()
@@ -451,3 +469,122 @@ def test_a_complementary_source_can_still_be_plugged_in() -> None:
         assert rubric.operator_import, (
             f"R{number:02d} doit rester renseignable à la main quand l'API ne la sert pas"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Saisons : février 2026 appartient à 2025-26
+# --------------------------------------------------------------------------- #
+
+
+def test_a_date_in_the_first_half_of_a_year_belongs_to_the_previous_season() -> None:
+    """Chercher un match de février 2026 en saison 2026 ne le trouve jamais."""
+    assert season_of(dt.date(2026, 2, 14)) == 2025
+    assert season_of(dt.date(2026, 6, 30)) == 2025, "juin clôt la saison"
+    assert season_of(dt.date(2026, 7, 1)) == 2026, "juillet ouvre la suivante"
+    assert season_of(dt.date(2026, 9, 14)) == 2026
+    assert season_of(dt.date(2025, 12, 31)) == 2025
+
+
+def test_the_two_season_readings_agree() -> None:
+    """Une sonde et une recherche de rencontre doivent parler de la même saison."""
+    for year in (2024, 2025, 2026):
+        assert season_year(f"{year}-{str(year + 1)[2:]}") == year
+        assert season_of(dt.date(year, 9, 1)) == year
+        assert season_of(dt.date(year + 1, 3, 1)) == year
+    assert season_year("2026") == 2026
+    assert season_year("abc") is None, "une saison illisible ne devient pas un nombre"
+
+
+def test_a_fixture_lookup_uses_the_season_the_calendar_gives_it() -> None:
+    seen: list[str] = []
+
+    def watch(url: str, **_kwargs: object) -> tuple[object, dt.datetime]:
+        seen.append(url)
+        return ({"errors": [], "response": []}, dt.datetime.now(UTC))
+
+    provider = ApiFootballProvider(token="clé-de-test", fetch=watch)
+    provider.team_sheets(
+        Fixture("A", "B", dt.date(2026, 2, 14), competition="it.1")
+    )
+    assert any("season=2025" in url for url in seen), seen
+    seen.clear()
+    provider.team_sheets(
+        Fixture("A", "B", dt.date(2026, 9, 14), competition="it.1")
+    )
+    assert any("season=2026" in url for url in seen), seen
+
+
+# --------------------------------------------------------------------------- #
+# Couverture : trois familles, des rencontres nommées, un vrai motif
+# --------------------------------------------------------------------------- #
+
+
+def test_coverage_probes_injuries_and_lineups_as_well_as_statistics() -> None:
+    """Un plan peut servir les statistiques et refuser les absences."""
+    provider = ApiFootballProvider(
+        token="clé-de-test",
+        fetch=_recorded(
+            {
+                "fixtures/statistics": _statistics_payload(),
+                "fixtures/lineups": _lineups_payload(),
+                "injuries": {"errors": [], "response": []},
+                "fixtures": {
+                    "errors": [],
+                    "response": [
+                        {
+                            "fixture": {"id": 77, "date": "2026-09-13T18:45:00+00:00"},
+                            "teams": {
+                                "home": {"name": "SSC Napoli"},
+                                "away": {"name": "Bologna FC 1909"},
+                            },
+                        }
+                    ],
+                },
+            }
+        ),
+    )
+    matrix = provider.coverage(["it.1"], ["2026-27"])
+    fields = {entry.field: entry.state for entry in matrix.entries}
+    assert fields["compositions"] is FieldState.SERVED
+    assert fields["absences"] is FieldState.PRESENT_BUT_NULL, (
+        "une réponse vide n'est ni un service confirmé ni une absence de champ"
+    )
+    assert fields["xg"] is FieldState.SERVED
+
+    rendered = matrix.render()
+    assert "rencontres échantillonnées" in rendered
+    assert "SSC Napoli – Bologna FC 1909" in rendered
+    assert "c'est un sondage, pas un inventaire" in rendered
+
+
+def test_an_empty_table_keeps_the_real_reason() -> None:
+    """« Sans clé » affiché alors qu'une clé est posée envoie chercher un faux problème."""
+    quota = ApiFootballProvider(
+        token="clé-de-test",
+        fetch=_recorded(
+            {"fixtures": {"errors": {"requests": "You have reached your daily limit"}}}
+        ),
+    ).coverage(["it.1"], ["2026-27"])
+    assert quota.entries == ()
+    assert "quota épuisé" in quota.render()
+    assert "aucune clé" not in quota.render()
+
+    refused = ApiFootballProvider(
+        token="clé-expirée",
+        fetch=_recorded({"fixtures": {"errors": {"token": "invalid api key"}}}),
+    ).coverage(["it.1"], ["2026-27"])
+    assert "clé refusée" in refused.render()
+
+    empty = ApiFootballProvider(
+        token="clé-de-test",
+        fetch=_recorded({"fixtures": {"errors": [], "response": []}}),
+    ).coverage(["it.1"], ["2026-27"])
+    assert "saison inaccessible ou vide" in empty.render()
+
+    unmapped = ApiFootballProvider(
+        token="clé-de-test", fetch=_recorded({})
+    ).coverage(["nl.1"], ["2026-27"])
+    assert "non cartographiée" in unmapped.render()
+
+    missing = ApiFootballProvider(token="").coverage(["it.1"], ["2026-27"])
+    assert CREDENTIAL in missing.render()

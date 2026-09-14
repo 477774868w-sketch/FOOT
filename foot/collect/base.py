@@ -17,12 +17,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from foot.collect.supplements import LineupRow
+from foot.collect.supplements import AbsenceRow, LineupRow, XgRow
 from foot.domain import Fixture, MatchLog
 from foot.market.odds import MatchOdds
 from foot.provenance import Evidence, Source, utcnow
 
 __all__ = [
+    "AbsenceSource",
     "Capability",
     "ClosingSource",
     "CollectionError",
@@ -36,6 +37,7 @@ __all__ = [
     "ResultSet",
     "SeasonData",
     "SeasonSource",
+    "XgSource",
 ]
 
 
@@ -195,6 +197,45 @@ class LineupSource(Protocol):
         self, fixture: Fixture
     ) -> tuple[Sequence[LineupRow], Sequence[Evidence]]:
         """Sheets known for one fixture, with the evidence that found them."""
+
+
+@runtime_checkable
+class AbsenceSource(Protocol):
+    """A provider that can serve **reported absences for one fixture**.
+
+    Kept apart from :class:`LineupSource` because the two answer different
+    questions at different moments: an absence list exists days before a match,
+    a team sheet an hour before it. A plan can serve one and refuse the other.
+    """
+
+    @property
+    def name(self) -> str:
+        """Identifier used in reports."""
+
+    def absences(
+        self, fixture: Fixture
+    ) -> tuple[Sequence[AbsenceRow], Sequence[Evidence]]:
+        """Absences claimed for one fixture, with the evidence that found them."""
+
+
+@runtime_checkable
+class XgSource(Protocol):
+    """A provider that can serve advanced statistics for **played** matches.
+
+    The engine passes the past fixtures it wants covered — never the upcoming
+    one. Reading the statistics of a match that has not been played would either
+    return nothing or, worse, return a partial live line, and a forecast must not
+    be built on either.
+    """
+
+    @property
+    def name(self) -> str:
+        """Identifier used in reports."""
+
+    def xg_rows(
+        self, fixtures: Sequence[Fixture]
+    ) -> tuple[Sequence[XgRow], Sequence[Evidence]]:
+        """Expected goals for those played fixtures, as supplement rows."""
 
 
 @runtime_checkable

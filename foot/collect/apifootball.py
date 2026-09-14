@@ -60,6 +60,8 @@ __all__ = [
     "parse_injuries",
     "parse_lineups",
     "parse_statistics",
+    "season_of",
+    "season_year",
 ]
 
 CREDENTIAL = "API_FOOTBALL_KEY"
@@ -84,6 +86,31 @@ _WATCHED_ROLES: Mapping[str, str] = {
 }
 
 FULL_ELEVEN = 11
+
+_SEASON_TURNS = 7
+"""Month at which a European season rolls over: July starts the new one."""
+
+
+def season_of(date: dt.date) -> int:
+    """The season a date belongs to, as API-Football numbers it.
+
+    European leagues run across the calendar: a match played in February 2026
+    belongs to season **2025**-26. Taking the calendar year made every fixture in
+    the first half of a year searched under the wrong season — so it was never
+    found, and the data silently never arrived.
+    """
+    return date.year if date.month >= _SEASON_TURNS else date.year - 1
+
+
+def season_year(season: str) -> int | None:
+    """``"2025-26"`` → ``2025``; a bare year works too. ``None`` if unreadable.
+
+    The same rule as :func:`season_of`, read from the other end: both must agree,
+    or a coverage probe and a fixture lookup would disagree about which season
+    they are talking about.
+    """
+    head = season.split("-", maxsplit=1)[0].strip()
+    return int(head) if head.isdigit() and len(head) == 4 else None
 
 
 class FieldState(Enum):
@@ -480,12 +507,23 @@ class CoverageMatrix:
 
     entries: tuple[FieldSupport, ...] = ()
     note: str = ""
+    reason: str = ""
+    """Why the table is empty, when it is — never assumed to be « no key ».
+
+    A quota spent, a key refused, a season with no fixture and an absent
+    credential are four different situations. Printing one message for all of
+    them sends the operator to look for a key they already have.
+    """
+
+    sampled: tuple[str, ...] = ()
+    """The fixtures actually inspected, named so the verdict can be re-checked."""
 
     def render(self) -> str:
         if not self.entries:
             return (
-                "Aucune couverture mesurée : sans clé API_FOOTBALL_KEY, rien n'a "
-                "été demandé et rien n'est affirmé."
+                "Aucune couverture mesurée — "
+                + (self.reason or "motif inconnu")
+                + (f"\n  {self.note}" if self.note else "")
             )
         lines = ["COUVERTURE VÉRIFIÉE CHAMP PAR CHAMP (mesurée, non annoncée)"]
         lines.extend(f"  {entry.render()}" for entry in self.entries)
@@ -494,6 +532,13 @@ class CoverageMatrix:
         if missing:
             lines.append(
                 "  champs non servis à ce compte : " + ", ".join(missing)
+            )
+        if self.sampled:
+            lines.append("  rencontres échantillonnées :")
+            lines.extend(f"    {label}" for label in self.sampled)
+            lines.append(
+                "  Un champ trouvé sur ces rencontres ne prouve pas qu'il l'est "
+                "sur tout le championnat : c'est un sondage, pas un inventaire."
             )
         if self.note:
             lines.append(f"  {self.note}")
@@ -665,29 +710,41 @@ class ApiFootballProvider:
         )
         return (rows, tuple(row.evidence(retrieved) for row in rows))
 
-    def xg_rows(self, fixture: Fixture) -> tuple[XgRow, ...]:
-        """The fixture's xG as a supplement row — **only if both sides carry it**.
+    def xg_rows(
+        self, fixtures: Sequence[Fixture]
+    ) -> tuple[tuple[XgRow, ...], tuple[Evidence, ...]]:
+        """Expected goals for **played** fixtures, as supplement rows.
+
+        Satisfies :class:`~foot.collect.base.XgSource`. The caller chooses which
+        matches are relevant — it holds the history and the availability cut —
+        and this method only fetches. One request per fixture, so the caller also
+        controls the quota by controlling the list.
 
         A half-served match produces nothing: an xG line with one side invented
         would be worse than no line at all.
         """
-        rows, _evidence = self.statistics(fixture)
-        by_team = {row.team: row for row in rows}
-        home = by_team.get(fixture.home)
-        away = by_team.get(fixture.away)
-        if home is None or away is None or home.xg is None or away.xg is None:
-            return ()
-        return (
-            XgRow(
-                date=fixture.date,
-                home=fixture.home,
-                away=fixture.away,
-                home_xg=home.xg,
-                away_xg=away.xg,
-                source="API-Football",
-                status=Confidence.CONFIRMED,
-            ),
-        )
+        rows: list[XgRow] = []
+        evidence: list[Evidence] = []
+        for fixture in fixtures:
+            stats, notes = self.statistics(fixture)
+            evidence.extend(notes)
+            by_team = {row.team: row for row in stats}
+            home = by_team.get(fixture.home)
+            away = by_team.get(fixture.away)
+            if home is None or away is None or home.xg is None or away.xg is None:
+                continue
+            rows.append(
+                XgRow(
+                    date=fixture.date,
+                    home=fixture.home,
+                    away=fixture.away,
+                    home_xg=home.xg,
+                    away_xg=away.xg,
+                    source="API-Football",
+                    status=Confidence.CONFIRMED,
+                )
+            )
+        return (tuple(rows), tuple(evidence))
 
     def _fixture_id(self, fixture: Fixture) -> int | None:
         """Find the provider's fixture id for one of our fixtures."""
@@ -695,7 +752,7 @@ class ApiFootballProvider:
         if league is None:
             return None
         path = (
-            f"/fixtures?league={league}&season={fixture.date.year}"
+            f"/fixtures?league={league}&season={season_of(fixture.date)}"
             f"&date={fixture.date.isoformat()}"
         )
         try:
@@ -782,15 +839,21 @@ class ApiFootballProvider:
     ) -> CoverageMatrix:
         """Measure, field by field, what this account gets per competition-season.
 
-        One request per competition-season, on a played fixture, and the response
-        is then inspected **per field**. A generic "statistics available" is never
-        turned into a confirmation of xG, npxG, shots or cards.
+        Three families are probed **separately**, because a plan can serve one
+        and refuse another: match statistics, injuries, and team sheets. A
+        generic "statistics available" is never turned into a confirmation of
+        xG, npxG, shots, injuries or lineups.
+
+        Every verdict names the fixture it was drawn from. One fixture is a
+        sample, not an inventory, and the table says so.
         """
         if not self.configured:
             return CoverageMatrix(
-                note=f"aucune clé dans {CREDENTIAL} : rien n'a été demandé."
+                reason=f"aucune clé dans {CREDENTIAL} : rien n'a été demandé."
             )
         responses: dict[tuple[str, str], object] = {}
+        extra: list[FieldSupport] = []
+        sampled: list[str] = []
         failures: list[str] = []
         for competition in competitions:
             league = COMPETITION_IDS.get(competition)
@@ -798,26 +861,100 @@ class ApiFootballProvider:
                 failures.append(f"{competition} : non cartographiée")
                 continue
             for season in seasons:
-                year = season.split("-", maxsplit=1)[0]
+                year = season_year(season)
+                if year is None:
+                    failures.append(f"{competition} {season} : saison illisible")
+                    continue
                 try:
                     fixtures, _ = self._get(
                         f"/fixtures?league={league}&season={year}&last=1"
                     )
-                    identifier = _first_fixture_id(fixtures)
-                    if identifier is None:
-                        failures.append(f"{competition} {season} : aucune rencontre")
-                        continue
-                    payload, _ = self._get(
-                        f"/fixtures/statistics?fixture={identifier}"
-                    )
                 except (CollectionError, ProviderBlockedError) as error:
                     failures.append(f"{competition} {season} : {error}")
                     continue
-                responses[(competition, season)] = payload
+                identifier = _first_fixture_id(fixtures)
+                if identifier is None:
+                    failures.append(
+                        f"{competition} {season} : aucune rencontre renvoyée"
+                    )
+                    continue
+                sampled.append(
+                    f"{competition} {season} — {_fixture_label(fixtures)} "
+                    f"(id {identifier})"
+                )
+                for kind, path in (
+                    ("statistiques", f"/fixtures/statistics?fixture={identifier}"),
+                    ("absences", f"/injuries?fixture={identifier}"),
+                    ("compositions", f"/fixtures/lineups?fixture={identifier}"),
+                ):
+                    try:
+                        payload, _ = self._get(path)
+                    except (CollectionError, ProviderBlockedError) as error:
+                        extra.append(
+                            FieldSupport(
+                                field=kind,
+                                competition=competition,
+                                season=season,
+                                state=FieldState.NOT_PROBED,
+                                detail=str(error),
+                            )
+                        )
+                        continue
+                    if kind == "statistiques":
+                        responses[(competition, season)] = payload
+                        continue
+                    rows = _rows(payload)
+                    extra.append(
+                        FieldSupport(
+                            field=kind,
+                            competition=competition,
+                            season=season,
+                            state=(
+                                FieldState.SERVED
+                                if rows
+                                else FieldState.PRESENT_BUT_NULL
+                            ),
+                            sampled=len(rows),
+                            detail=(
+                                ""
+                                if rows
+                                else "réponse vide : non publié, ou non servi par "
+                                "ce plan — un seul sondage ne tranche pas"
+                            ),
+                        )
+                    )
+        entries = tuple(field_coverage(responses)) + tuple(extra)
         return CoverageMatrix(
-            entries=field_coverage(responses),
+            entries=entries,
             note=" ; ".join(failures),
+            reason=_empty_reason(failures),
+            sampled=tuple(sampled),
         )
+
+
+def _empty_reason(failures: Sequence[str]) -> str:
+    """Why nothing came back, in the operator's own terms."""
+    if not failures:
+        return "aucune requête n'a abouti, sans motif rapporté"
+    joined = " ; ".join(failures)
+    lowered = joined.lower()
+    if "limit" in lowered or "quota" in lowered:
+        return f"quota épuisé — {joined}"
+    if "token" in lowered or "key" in lowered or "refusé" in lowered:
+        return f"clé refusée — {joined}"
+    if "aucune rencontre" in lowered:
+        return f"saison inaccessible ou vide — {joined}"
+    return joined
+
+
+def _fixture_label(payload: object) -> str:
+    for block in _rows(payload):
+        home = _text(_nested(block, "teams", "home", "name"))
+        away = _text(_nested(block, "teams", "away", "name"))
+        date = _text(_nested(block, "fixture", "date"))[:10]
+        if home and away:
+            return f"{home} – {away} {date}".strip()
+    return "rencontre sans identité lisible"
 
 
 def _first_fixture_id(payload: object) -> int | None:

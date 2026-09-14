@@ -57,17 +57,24 @@ from foot.analysis.rubrics import (
 )
 from foot.analysis.xg import XgBalance
 from foot.collect.base import (
+    AbsenceSource,
     Capability,
     LineupSource,
     MarketSource,
     OddsSource,
     SeasonData,
     SeasonSource,
+    XgSource,
 )
 from foot.collect.catalogue import PROVIDER_CATALOGUE
 from foot.collect.openfootball import COMPETITIONS, resolve_competition
 from foot.collect.registry import Registry, RegistryReport
-from foot.collect.supplements import FULL_LINEUP, LineupRow, SupplementSet
+from foot.collect.supplements import (
+    FULL_LINEUP,
+    LineupRow,
+    SupplementSet,
+    XgRow,
+)
 from foot.data.synthetic import SYNTHETIC_MARKER
 from foot.domain import Fixture, Match, MatchLog, Outcome
 from foot.markets.catalogue import standard_catalogue
@@ -154,6 +161,15 @@ class MatchAnalysis:
     lineup_plan: LineupPlan | None = None
     ledger: Ledger = field(default_factory=Ledger)
     scenarios: tuple[Scenario, ...] = ()
+    collected: tuple[str, ...] = ()
+    """What the automatic collection actually supplied, counted and named.
+
+    Separate from the operator's own imports: « 2 absences » must say whether
+    they were typed or fetched, and by whom. Empty when nothing was collected —
+    which is the normal state without a key, and is reported as such rather than
+    left to look like an absence of data.
+    """
+
     import_notes: tuple[str, ...] = ()
     """Supplied lines this analysis could not use, and why.
 
@@ -236,6 +252,7 @@ class Engine:
     """Runs the whole pipeline for a batch of requested matches."""
 
     __slots__ = (
+        "_absence_sources",
         "_config",
         "_criteria",
         "_duplicates",
@@ -248,6 +265,7 @@ class Engine:
         "_registry",
         "_rubrics",
         "_used",
+        "_xg_sources",
     )
 
     def __init__(
@@ -287,6 +305,19 @@ class Engine:
         )
         # Sheet sources are sporting information, so they belong to the sport
         # phase — unlike prices, which are only read once the dossier is sealed.
+        self._absence_sources: tuple[AbsenceSource, ...] = tuple(
+            provider
+            for provider in registry
+            if isinstance(provider, AbsenceSource)
+            and Capability.INJURIES in getattr(provider, "capabilities", frozenset())
+        )
+        self._xg_sources: tuple[XgSource, ...] = tuple(
+            provider
+            for provider in registry
+            if isinstance(provider, XgSource)
+            and Capability.ADVANCED_STATS
+            in getattr(provider, "capabilities", frozenset())
+        )
         self._lineup_sources: tuple[LineupSource, ...] = tuple(
             provider
             for provider in registry
@@ -351,6 +382,75 @@ class Engine:
             "exécuterait la boucle sans rien avoir à lire. Relevé manuel : "
             "--compositions-csv, ou le champ Compositions du formulaire."
         )
+
+    def _collector_names(self) -> tuple[str, ...]:
+        """Every automatic context source, in the order they are consulted."""
+        return tuple(
+            dict.fromkeys(
+                [source.name for source in self._lineup_sources]
+                + [source.name for source in self._absence_sources]
+                + [source.name for source in self._xg_sources]
+            )
+        )
+
+    def _collect_context(
+        self,
+        fixture: Fixture,
+        supplied: SupplementSet,
+        history: MatchLog,
+        as_of: dt.datetime,
+    ) -> tuple[SupplementSet, list[Evidence]]:
+        """Collect every automatic context, before the cut and before the seal.
+
+        Three families, three sources, one door. Adding a provider to the
+        registry used to bring its team sheets and nothing else: xG and absences
+        were read by nobody, so a key changed less than it appeared to.
+
+        Everything collected here still crosses ``available_at`` afterwards, so
+        an automatic source never sees further into the future than a human one.
+        """
+        extra, evidence = self._collect_sheets(fixture, supplied)
+        rows = list(extra.absences)
+        known = {
+            (row.team.casefold(), row.player.casefold(), row.date)
+            for row in rows
+        }
+        for source in self._absence_sources:
+            try:
+                found, notes = source.absences(fixture)
+            except Exception as error:  # une source cassée n'arrête pas l'analyse
+                evidence.append(_source_failure(source.name, fixture, error))
+                continue
+            evidence.extend(notes)
+            for row in found:
+                signature = (row.team.casefold(), row.player.casefold(), row.date)
+                if signature in known:
+                    continue
+                known.add(signature)
+                rows.append(row)
+        if len(rows) != len(extra.absences):
+            extra = replace(extra, absences=tuple(rows))
+
+        wanted = _recent_fixtures(fixture, history, as_of)
+        if wanted and self._xg_sources:
+            seen = {(r.home.casefold(), r.away.casefold(), r.date) for r in extra.xg}
+            collected: list[XgRow] = list(extra.xg)
+            for stats in self._xg_sources:
+                try:
+                    found_xg, notes = stats.xg_rows(wanted)
+                except Exception as error:  # idem : rapportée, jamais avalée
+                    evidence.append(_source_failure(stats.name, fixture, error))
+                    continue
+                evidence.extend(notes)
+                for line in found_xg:
+                    signature = (line.home.casefold(), line.away.casefold(), line.date)
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
+                    collected.append(line)
+            if len(collected) != len(extra.xg):
+                extra = replace(extra, xg=tuple(collected))
+        return (extra, evidence)
 
     def _collect_sheets(
         self, fixture: Fixture, supplied: SupplementSet
@@ -775,8 +875,10 @@ class Engine:
         # pasted, *before* the cut: collected or typed, a sheet must cross the
         # same availability filter, or an automatic source would be allowed to
         # see further into the future than a human one.
-        extra, collected = self._collect_sheets(fixture, extra)
+        before = (len(extra.xg), len(extra.absences), len(extra.lineups))
+        extra, collected = self._collect_context(fixture, extra, history, as_of)
         evidence.extend(collected)
+        gathered = _collection_summary(before, extra, self._collector_names())
         # One input, cut once. Everything downstream — estimate, findings,
         # scenarios, lineup check, decision — reads `sport_input`, never the
         # raw history or the raw supplements, so none of them can see further
@@ -914,6 +1016,7 @@ class Engine:
             ),
             exposure=audit,
             lineup_plan=plan,
+            collected=gathered,
             ledger=ledger,
             scenarios=tuple(scenarios),
         )
@@ -1947,3 +2050,77 @@ def _source_failure(name: str, fixture: Fixture, error: Exception) -> Evidence:
             f"« aucune composition publiée », c'est une source à réparer"
         ),
     )
+
+
+RECENT_MATCHES_PER_TEAM = 5
+"""How many past matches per team an xG source is asked about.
+
+A bound, not a preference: each one costs a request, and an unbounded sweep of a
+season would spend a quota on data the form window never reads.
+"""
+
+
+def _recent_fixtures(
+    fixture: Fixture, history: MatchLog, as_of: dt.datetime
+) -> tuple[Fixture, ...]:
+    """The recent **played** matches of both teams, most recent first.
+
+    Not the upcoming match: its statistics do not exist yet, and asking for them
+    would return nothing or a partial live line. Cut at ``as_of`` like everything
+    else, so an automatic source cannot see a result the operator could not.
+    """
+    cut = as_of.date()
+    wanted: list[Fixture] = []
+    seen: set[tuple[dt.date, str, str]] = set()
+    for team in (fixture.home, fixture.away):
+        played = [
+            match
+            for match in history
+            if match.date < cut and team in (match.home, match.away)
+        ]
+        played.sort(key=lambda m: m.date, reverse=True)
+        for match in played[:RECENT_MATCHES_PER_TEAM]:
+            identity = (match.date, match.home, match.away)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            wanted.append(
+                Fixture(
+                    home=match.home,
+                    away=match.away,
+                    date=match.date,
+                    # The history handed here is *this* competition's, indexed
+                    # under the key the engine resolved. That key is what a
+                    # provider can translate; a label carried by an individual
+                    # row may be a display name nothing maps.
+                    competition=fixture.competition or match.competition,
+                )
+            )
+    return tuple(wanted)
+
+
+def _collection_summary(
+    before: tuple[int, int, int], after: SupplementSet, sources: Sequence[str]
+) -> tuple[str, ...]:
+    """Name what the automatic collection added, or say plainly that it added nothing.
+
+    Counting the difference rather than the total is what keeps the operator's
+    own paste distinguishable from a provider's answer — the report must never
+    credit a source for a line somebody typed.
+    """
+    gained = (
+        len(after.xg) - before[0],
+        len(after.absences) - before[1],
+        len(after.lineups) - before[2],
+    )
+    labels = ("ligne(s) xG", "absence(s)", "ligne(s) de composition")
+    parts = [
+        f"{count} {label}"
+        for count, label in zip(gained, labels, strict=True)
+        if count > 0
+    ]
+    if not parts:
+        if not sources:
+            return ()
+        return (f"aucune donnée collectée par {', '.join(sources)}",)
+    return (f"{', '.join(parts)} — collectées par {', '.join(sources)}",)

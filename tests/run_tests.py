@@ -21,9 +21,12 @@ import sys
 import time
 import traceback
 import unittest
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parent
@@ -78,6 +81,30 @@ def load(path: Path) -> ModuleType:
     return module
 
 
+def _refuse_outbound() -> Any:
+    """Forbid outbound HTTP for the whole ``--sans-reseau`` run.
+
+    Without it, "no network" means "no module named *live*" — which a test in any
+    other file can quietly break, as one did by probing a real service with a
+    fake key. A local proxy makes an address check useless, so the refusal sits
+    at the HTTP boundary.
+    """
+    original = urllib.request.OpenerDirector.open
+
+    def guarded(self: Any, fullurl: Any, *args: Any, **kwargs: Any) -> Any:
+        url = fullurl if isinstance(fullurl, str) else getattr(fullurl, "full_url", "")
+        host = urllib.parse.urlsplit(url).hostname or ""
+        if host in {"127.0.0.1", "::1", "localhost"}:
+            return original(self, fullurl, *args, **kwargs)
+        raise RuntimeError(
+            f"sortie réseau refusée vers {url!r} : ce lanceur tourne en "
+            f"--sans-reseau. Injectez une réponse enregistrée."
+        )
+
+    urllib.request.OpenerDirector.open = guarded  # type: ignore[method-assign]
+    return original
+
+
 NETWORK_MODULES = ("test_live_sources",)
 """Modules that reach a remote host. Excluded by ``--sans-reseau``.
 
@@ -104,6 +131,7 @@ def run_suite(
     """
     summary = Summary()
     started = time.time()
+    guard = _refuse_outbound() if skip_network else None
     for path in sorted(directory.glob("test_*.py")):
         if skip_network and path.stem in NETWORK_MODULES:
             continue
@@ -134,6 +162,8 @@ def run_suite(
                 print(mark, end="", flush=True)
                 if verbose:
                     print(f" {label}")
+    if guard is not None:
+        urllib.request.OpenerDirector.open = guard  # type: ignore[method-assign]
     summary.elapsed = time.time() - started
     return summary
 

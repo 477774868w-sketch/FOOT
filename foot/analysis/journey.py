@@ -164,6 +164,14 @@ def run_journey(
         used.append(f"{len(usable.absences)} absence(s)")
     if usable.lineups:
         used.append(f"{len(usable.lineups)} ligne(s) de composition")
+    # What the engine fetched by itself, named apart from what was pasted: the
+    # report must never credit a provider for a line the operator typed, nor
+    # leave an automatic collection invisible because no file was supplied.
+    used.extend(
+        dict.fromkeys(
+            note for analysis in run.analyses for note in analysis.collected
+        )
+    )
     notes = tuple(
         dict.fromkeys(
             note for analysis in run.analyses for note in analysis.import_notes
