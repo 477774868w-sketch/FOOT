@@ -36,12 +36,20 @@ Les 9 autres restent marquées indisponibles, jamais comblées.
 ### B. Le minimum utile — ≈ 19 €/mois
 
 **API-Football, plan Pro** (≈ 19 €/mois, 7 500 requêtes/jour).
-Débloque absences, compositions et xG : **R07, R10, R11, R21**, et partiellement
-R08/R09/R14. C'est le seul fournisseur catalogué qui couvre absences *et* xG,
-et son adaptateur **reste à écrire** — comptez ce travail en plus de
-l'abonnement.
+Débloque absences, compositions et xG : **R07, R10, R11, R21**. **L'adaptateur
+est écrit et testé** — il ne manque que la clé.
 
-Passe la couverture de 13 à environ **18 rubriques sur 22**.
+Ce qu'il ne débloque **pas**, et qu'aucun abonnement ne débloquera seul :
+**R08, R09 et R14** demandent la chronologie des événements, pas des totaux de
+match. Les fabriquer à partir des totaux produirait un chiffre d'apparence
+rigoureuse et sans fondement ; le logiciel refuse de le faire.
+
+Avant de payer plus qu'un mois : `foot couverture` mesure **champ par champ** ce
+que votre plan renvoie réellement. Un plan peut servir les tirs sans servir les
+xG, et c'est précisément la différence qui justifie ou non la dépense.
+
+Passe la couverture de 13 à environ **17 rubriques sur 22** — sous réserve de ce
+que `foot couverture` mesurera sur votre compte.
 
 ### C. Complet — ≈ 49 €/mois
 
@@ -91,7 +99,9 @@ Rien n'est engagé tant que vous ne le dites pas. Trois décisions, séparées :
 2. **Ouvrir un compte gratuit football-data.org ?** (0 €) — l'adaptateur est
    écrit et testé, mais le plan gratuit **ne sert pas les compositions** : la
    sonde vous le confirmera sur votre propre clé avant toute dépense.
-3. **Souscrire API-Football Pro (≈ 19 €/mois) ?** — c'est la seule dépense qui
-   change vraiment la couverture, et elle suppose d'abord d'écrire l'adaptateur.
+3. **Souscrire API-Football Pro (≈ 19 €/mois) ?** — la seule dépense qui change
+   vraiment la couverture. L'adaptateur est désormais écrit et testé ; la
+   première chose à faire avec la clé est `foot couverture`, qui dira champ par
+   champ ce que le plan sert avant que vous ne renouveliez.
 
 Dites-moi lesquelles vous voulez, et je m'arrête là où vous vous arrêtez.

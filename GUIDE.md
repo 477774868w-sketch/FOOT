@@ -274,6 +274,7 @@ Extrait de la fiche :
 | `foot journal` | relit les prévisions écrites avant match, jamais réécrites |
 | `foot mesurer` | apparie le journal aux résultats et le note — **sans rien y réécrire** |
 | `foot config` / `foot fournisseurs --couverture` | ce que chaque clé débloque et coûte, mesuré ([COUTS.md](COUTS.md)) |
+| `foot couverture` | ce que votre compte API-Football reçoit **champ par champ** |
 | `foot config` | quelles clés sont posées, ce qu'elles débloquent, ce qu'elles coûtent |
 | `foot fournisseurs` | sonde chaque source ; `--couverture` ajoute coût et accès réel |
 | `foot rubriques` | la grille des 22 rubriques et ce que chacune exige |

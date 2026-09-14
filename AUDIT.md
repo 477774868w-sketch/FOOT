@@ -937,3 +937,124 @@ ruff check .                 propre
 mypy .                       propre, 97 fichiers
 protocole synchronisé        protocole/protocole-22-rubriques.json == dump_rubrics()
 ```
+
+
+---
+
+## 14. Sixième revue du commit `b27d03c` — corrections et adaptateur API-Football
+
+### 14.1 Cinq écarts reproduits, corrigés
+
+| # | Reproduit sur `b27d03c` | Correction |
+|---|---|---|
+| 1 | Le `Supervisor` du serveur web réutilisait le moteur ordinaire, donc son cache de six heures : compositions publiées à 19:45, **zéro joueur à 19:45 et 19:50** | `_watch_engine()` est la seule porte, empruntée par `foot suivre` **et** par le bouton Suivre. Le test exécute la même scène aux **deux** fraîcheurs dans une seule fonction : c'est la comparaison qui prouve que le réglage est la cause. |
+| 2 | Suivi armé à 15:45 pour un match à 20:45 : **premier contrôle à 16:45** au lieu de 19:30, `_sleep` plafonnant à une heure sans que la boucle revérifie | `_wait_until` dort par paliers jusqu'à l'heure prévue et s'arrête si l'horloge n'avance plus. Les cotes gardent l'heure de **lancement**, pas celle du premier contrôle. |
+| 3 | `_render_ledger` affichait le journal et renvoyait vers `foot mesurer` | `Supervisor.measure_async` calcule côté serveur, en arrière-plan, avec un avancement lisible ; rappuyer consulte sans relancer ; un échec est rapporté. |
+| 4 | `odds()` appelée sans argument (E0 / 2024-25 pour une demande it.1 / 2026-27) ; identifiants « Serie A (Italie) » au lieu de `it.1` ; deux bookmakers écrasant la même clé ; colonnes `B365H` lues comme des clôtures | Protocole `ClosingSource` portant compétition et saison ; clés de compétition normalisées ; le **bookmaker entre dans l'identité**, et « même bookmaker » est distingué d'une « référence de marché » qui n'existe que si les livres s'accordent ; colonnes `B365CH/CD/CA`, et un fichier sans colonnes de clôture ne rend **rien**. |
+| 5 | Un rapport daté de la veille du coup d'envoi réglait déjà le pari dès qu'on lui fournissait le résultat futur | La date limite filtre **les deux côtés** : une rencontre non jouée à cette date reste en attente. |
+
+**Défaut trouvé en corrigeant :** `_dataset_evidence` marquait `UNAVAILABLE` une
+saison sans match joué tout en portant une valeur, ce qui levait une
+`ValueError`. Zéro résultat n'est pas une donnée absente — une saison non
+commencée est un fait confirmé, et les rencontres à venir prouvent que la requête
+a abouti.
+
+**Le test qui compte.** Le n°1 n'est pas couvert par `Cache.with_ttl` pris
+isolément mais par une intégration qui pilote le **véritable adaptateur** — son
+cache, son parsing, ses en-têtes — contre des réponses contrôlées. L'adaptateur
+reçoit pour cela une horloge et un *fetcher* injectables : un cache dont
+l'expiration ne peut être exercée qu'en attendant quinze minutes est un cache que
+personne ne teste.
+
+### 14.2 Adaptateur API-Football — `foot/collect/apifootball.py`
+
+22 tests sur réponses enregistrées, sans clé ni réseau. Quatre garanties, chacune
+tenue par un test :
+
+**Zéro n'est pas une absence.** Une équipe qui a tiré zéro fois a tiré zéro fois ;
+un champ que le plan ne sert pas reste `None`. Les deux traversent le logiciel
+différemment.
+
+**Un indicateur générique ne vaut pas confirmation.** `field_coverage` établit la
+couverture **champ par champ**, par championnat et par saison, avec trois états
+distincts :
+
+```
+● xg                     it.1 2026-27 — servi (sur 2 ligne(s))
+· xg                     en.1 2026-27 — absent de la réponse
+◐ red_cards              it.1 2026-27 — présent, sans valeur
+· npxg                   it.1 2026-27 — absent de la réponse
+  champs non servis à ce compte : big_chances, npxg, penalties
+```
+
+La même réponse sert les tirs sans servir les xG : c'est exactement la confusion
+que « statistiques disponibles » entretenait.
+
+**Rien n'est dérivé de ce qui n'est pas servi.** L'API donne des totaux de match ;
+elle ne donne pas les xG à onze contre onze. **R08, R09 et R14 restent non
+développées**, et un test interdit de les rattacher à cet adaptateur.
+
+**Un doute n'est pas une absence.** « Questionable » est enregistré *probable*,
+« Missing Fixture » *confirmé* ; et aucune absence déclarée n'est pas la preuve
+d'un effectif au complet — la preuve le dit plutôt que de se taire.
+
+Deux autres refus : une réponse d'erreur renvoyée en **HTTP 200** (clé invalide,
+quota épuisé) est un refus explicite et non une ligue vide ; et aucune clé ne peut
+atteindre un rapport, ce qu'un test vérifie sur la sonde et sur le tableau.
+
+### 14.3 Raccordement aux rubriques
+
+| Rubrique | Avant | Après |
+|---|---|---|
+| R07 xG, tirs | aucun adaptateur écrit | adaptateur écrit ; **clé `API_FOOTBALL_KEY` à fournir** |
+| R11 absences | aucune source automatique | adaptateur écrit ; **clé à fournir** |
+| R10, R21 compositions | une source possible | **deux** sources possibles, nommées |
+| R08, R09, R14 | aucun adaptateur | **inchangé, volontairement** |
+
+Pour tout ce qui reste non servi, l'import opérateur demeure ouvert — un test le
+vérifie rubrique par rubrique.
+
+**Correction rendue nécessaire :** rattacher R07 à un adaptateur masquait le
+message « n lignes importées, aucune exploitable ». Envoyer quelqu'un souscrire un
+abonnement pour corriger une faute de frappe dans un nom d'équipe est la réponse
+la moins utile possible ; le motif de refus d'un import reprend la priorité.
+
+### 14.4 Parcours téléphone, exécuté de bout en bout
+
+Serveur réel, jeton, journal, moteur de suivi distinct, mesure raccordée :
+
+```
+1. ANALYSER : 200 | fiche produite | prévision conservée côté serveur
+2. SUIVRE   : 200 | suivi démarré  | limite annoncée : « s'arrête si le serveur s'arrête »
+3. BILAN    : 200 | mesure lancée en arrière-plan
+4. BILAN    : 200 | « Bilan mesuré » — 0 résolue, 1 en attente
+```
+
+La dernière ligne est le bon résultat : la rencontre se joue le 18 septembre, le
+rapport est daté du 14. **Rien n'est mesurable, et rien n'est affirmé.**
+
+### 14.5 Couverture obtenue avec le compte disponible
+
+**Aucune.** Aucune clé n'est configurée dans cet environnement, et la commande le
+dit sans appeler quoi que ce soit :
+
+```console
+$ python3 -m foot couverture
+Aucune clé dans API_FOOTBALL_KEY. L'adaptateur est écrit et testé sur réponses
+enregistrées ; ce que VOTRE compte reçoit ne peut être mesuré qu'avec une clé.
+Voir COUTS.md avant tout abonnement — rien n'est engagé ici.
+```
+
+Le blocage est donc précis : **il manque une clé, pas du code**. Les trois
+décisions de [COUTS.md](COUTS.md) restent ouvertes et rien n'est engagé.
+
+### 14.6 Vérifications
+
+```
+pytest -m "not network"      428 réussis, 1 ignoré
+python3 tests/run_tests.py --sans-reseau
+                             428 réussi(s), 0 échec(s), 1 ignoré(s) sur 429
+ruff check .                 propre
+mypy .                       propre, 100 fichiers
+protocole synchronisé        protocole/protocole-22-rubriques.json == dump_rubrics()
+```
