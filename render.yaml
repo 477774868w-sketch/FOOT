@@ -1,0 +1,81 @@
+# Hébergement sur Render — plan d'infrastructure, lisible et vérifiable.
+#
+# Ce fichier décrit le service ; il n'engage aucune dépense tant que vous ne
+# validez pas la création dans Render. Le coût exact et ce qu'il achète sont
+# détaillés dans COUTS.md, § « Hébergement sur Render ». Lisez-le avant de
+# cliquer : le plan « starter » est payant, le disque aussi.
+#
+# Ce que ce fichier met en place, et pourquoi chaque ligne y est :
+#
+#   * HTTPS            fourni par Render sur l'adresse *.onrender.com, sans
+#                      certificat à obtenir ni à renouveler ;
+#   * accès privé      un jeton tiré au hasard par Render (FOOT_JETON), jamais
+#                      écrit ici, jamais dans le dépôt ;
+#   * journal et cache sur un disque persistant, donc conservés d'un
+#                      déploiement à l'autre ;
+#   * suivis repris    le fichier des suivis vit sur ce même disque : un
+#                      redémarrage relance ceux dont le coup d'envoi est encore
+#                      devant, et déclare « manqué » les autres ;
+#   * clés d'API       saisies dans Render, jamais dans GitHub : « sync: false »
+#                      demande la valeur à la création et ne la stocke pas ici.
+
+services:
+  - type: web
+    name: foot
+    runtime: python
+    # « starter » et non « free » : le plan gratuit ne peut pas recevoir de
+    # disque persistant et s'endort après quelques minutes sans visite. Sans
+    # disque, le journal et les suivis disparaîtraient à chaque déploiement ;
+    # endormi, le serveur ne ferait pas le contrôle de T−75. Les deux sont
+    # précisément ce que cet hébergement doit garantir.
+    plan: starter
+    region: frankfurt
+    branch: claude/code-masterpiece-o2mbbl
+
+    # Aucune dépendance à installer : le projet n'en a pas. L'installation sert
+    # seulement à rendre le paquet importable.
+    buildCommand: pip install -e .
+
+    # Tout ce qui doit survivre est écrit sous /var/foot, le point de montage du
+    # disque. Le port est imposé par Render ; l'hôte doit être 0.0.0.0 pour que
+    # le service soit joignable depuis l'extérieur du conteneur.
+    startCommand: >-
+      python -m foot web
+      --hote 0.0.0.0
+      --port $PORT
+      --jeton "$FOOT_JETON"
+      --https-en-amont
+      --url-publique "$RENDER_EXTERNAL_URL"
+      --journal /var/foot/journal.jsonl
+      --suivis /var/foot/suivis.jsonl
+      --cache /var/foot/cache
+
+    # Pas de « healthCheckPath » : l'interface est privée, et une sonde sans
+    # jeton reçoit un refus — que Render lirait comme un service en panne.
+    # Render vérifie de toute façon que le port est bien ouvert.
+
+    disk:
+      name: donnees
+      mountPath: /var/foot
+      # 1 Go est très large : le journal est une ligne de texte par prévision,
+      # et le cache se purge tout seul en expirant. Le disque se redimensionne
+      # à la hausse plus tard, jamais à la baisse.
+      sizeGB: 1
+
+    envVars:
+      # « sync: false » : Render demande la valeur au moment de la création et
+      # la garde chiffrée de son côté. Elle n'est pas dans ce fichier, donc pas
+      # dans GitHub, et aucun écran ni journal de l'application ne l'affiche.
+      - key: API_FOOTBALL_KEY
+        sync: false
+      - key: ODDS_API_KEY
+        sync: false
+
+      # Le jeton d'accès : tiré au hasard par Render à la création. Vous le
+      # lisez une fois dans l'onglet « Environment » du service, vous ouvrez
+      # l'adresse avec « ?jeton=… », et le téléphone le retient ensuite.
+      - key: FOOT_JETON
+        generateValue: true
+
+      - key: PYTHON_VERSION
+        value: "3.12.6"

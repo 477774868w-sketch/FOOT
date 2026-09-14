@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "foot"
+version = "1.0.0"
+description = "A rigorous, dependency-free football (soccer) modelling engine: Dixon-Coles, Elo, market de-vigging, Kelly staking, leak-free backtesting and season simulation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["football", "soccer", "dixon-coles", "poisson", "elo", "betting", "forecasting"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Mathematics",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.scripts]
+foot = "foot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["foot*"]
+
+[tool.setuptools.package-data]
+foot = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+  "network: touche un hôte distant ; exclure avec -m 'not network'",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# Les règles en préversion ne sont PAS activées : elles changent d'une version à
+# l'autre, et une vérification qui bouge toute seule ne dit rien sur le code.
+# C'est pourquoi la CI épingle sa version de ruff (voir le workflow) : une mise à
+# jour d'outil devient alors un changement délibéré, pas une panne surprise.
+# PLR0917, stabilisée entre-temps, avait fait échouer une branche inchangée ;
+# les signatures concernées ont été corrigées sur le fond, en mots-clés.
+
+[tool.ruff.lint.isort]
+known-first-party = ["foot"]
+known-local-folder = ["support"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RET", "ARG", "PTH", "PL", "RUF"]
+ignore = [
+  "PLR0913", "PLR2004", "PLR0912", "PLR0915",
+  # The user-facing prose is French: ×, −, ≥ and typographic quotes
+  # are deliberate, not homoglyph mistakes.
+  "RUF001", "RUF002", "RUF003",
+]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+disallow_any_explicit = false
+
+# pytest est une commodité, pas une dépendance : la suite tourne sans lui via
+# `python3 tests/run_tests.py`. Son absence de stubs ne doit donc pas faire
+# échouer la vérification de types du projet.
+[[tool.mypy.overrides]]
+module = "pytest"
+ignore_missing_imports = true
+
+# conftest.py décore une fixture avec `@pytest.fixture`. Selon que pytest est
+# importable par mypy ou non, ce décorateur est typé ou vaut Any — si bien qu'un
+# `type: ignore` nécessaire dans un environnement est signalé comme inutile dans
+# l'autre. Désactiver la règle ici met les deux d'accord sans commentaire
+# conditionnel, qu'aucun outil ne peut écrire.
+[[tool.mypy.overrides]]
+module = "conftest"
+disallow_untyped_decorators = false
