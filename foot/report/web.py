@@ -32,7 +32,8 @@ from pathlib import Path
 from foot.analysis.engine import AnalysisRun, Engine
 from foot.analysis.journey import JourneyResult, run_journey
 from foot.analysis.ledgerbook import ForecastBook, record_run
-from foot.analysis.request import DEFAULT_TIMEZONE, resolve_timezone
+from foot.analysis.request import DEFAULT_TIMEZONE, parse_requests, resolve_timezone
+from foot.analysis.supervisor import Supervisor
 from foot.collect.supplements import SupplementSet
 from foot.markets.portfolio import build_ticket, plan_stakes
 from foot.report.card import render_card, render_rubric_grid
@@ -82,6 +83,11 @@ ul.rejets { margin:8px 0 0; padding-left:20px; font-size:0.86rem; }
 button { margin-top:18px; padding:11px 26px; border:0; border-radius:7px;
          background:var(--accent); color:#fff; font-size:0.97rem; font-weight:600;
          cursor:pointer; }
+.actions { display:flex; gap:10px; flex-wrap:wrap; }
+.actions button { flex:1 1 140px; }
+button.second { background:transparent; color:var(--accent);
+                box-shadow: inset 0 0 0 1.5px var(--accent); }
+@media (max-width:560px) { .actions { flex-direction:column; } }
 button:hover { filter:brightness(1.08); }
 .hint { color:var(--muted); font-size:0.82rem; margin-top:5px; }
 pre { background:var(--card); border:1px solid var(--line); border-radius:10px;
@@ -121,7 +127,15 @@ _FORM = """
       <input type="text" id="book" name="book" value="{book}" placeholder="ex. Pinnacle">
     </div>
   </div>
-  <button type="submit">Analyser</button>
+  <div class="actions">
+    <button type="submit" name="action" value="analyser">Analyser</button>
+    <button type="submit" name="action" value="suivre" class="second">Suivre</button>
+    <button type="submit" name="action" value="bilan" class="second">Bilan</button>
+  </div>
+  <p class="hint"><strong>Analyser</strong> produit une fiche par rencontre.
+    <strong>Suivre</strong> lance le contrôle T−75/T−60 côté serveur — il
+    continue même si vous fermez l'onglet. <strong>Bilan</strong> mesure les
+    prévisions déjà enregistrées.</p>
   <details class="ctx">
     <summary>Mises et combiné (facultatif)</summary>
     <div class="row">
@@ -373,11 +387,81 @@ def access_token(length: int = 24) -> str:
     return secrets.token_urlsafe(length)
 
 
+def _render_ledger(book: ForecastBook | None) -> str:
+    """The Bilan screen: what is already written, and how to measure it.
+
+    Deliberately does **not** run the measurement here: it needs results the
+    page has no business fetching on a button press, and a phone screen that
+    silently starts a long collection is a phone screen that times out. What it
+    shows is the journal itself, which is the thing a backup must restore.
+    """
+    if book is None:
+        return (
+            '<div class="note">Aucun journal n\'est conservé par ce serveur. '
+            "Démarrez-le avec <code>--journal</code> pour que chaque analyse "
+            "servie soit enregistrée.</div>"
+        )
+    lines = list(book)
+    written = book.render(limit=25)
+    retrospective = sum(1 for f in lines if f.retrospective)
+    note = (
+        f'<div class="note">Journal&nbsp;: <code>{html.escape(str(book.path))}</code> — '
+        f"{len(lines)} ligne(s), dont {retrospective} rejeu(x) rétrospectif(s). "
+        f"Sauvegarde&nbsp;: copiez ce fichier ; il se restaure en le remettant "
+        f"en place, et il se relit ligne à ligne. Mesure&nbsp;: "
+        f"<code>foot mesurer</code> une fois les résultats connus.</div>"
+    )
+    return note + _escape_block("Prévisions enregistrées", written)
+
+
+def _start_watch(
+    supervisor: Supervisor | None,
+    *,
+    matches: str,
+    zone: dt.tzinfo,
+    bookmaker: str,
+) -> str:
+    """The Suivre screen: start a server-side watch, then show every watch."""
+    if supervisor is None:
+        return (
+            '<div class="note">Le suivi côté serveur n\'est pas actif sur ce '
+            "serveur.</div>"
+        )
+    if matches.strip():
+        kickoff = _next_kickoff(matches, zone)
+        if kickoff is None:
+            return (
+                '<div class="note">Pour suivre une rencontre, indiquez son '
+                "heure de coup d'envoi dans la ligne, par exemple "
+                "<code>Napoli - Bologna 13/09/2026 20:45</code>.</div>"
+            )
+        supervisor.start(
+            matches=matches.strip().splitlines()[0],
+            kickoff=kickoff,
+            bookmaker=bookmaker,
+        )
+    return _escape_block("Suivis en cours", supervisor.render()) + (
+        '<div class="note">Un suivi lancé ici tourne sur le serveur&nbsp;: il '
+        "continue si vous fermez l'onglet, et s'arrête si le serveur s'arrête. "
+        "Rechargez cette page pour voir où il en est.</div>"
+    )
+
+
+def _next_kickoff(matches: str, zone: dt.tzinfo) -> dt.datetime | None:
+    """Read the kick-off out of the first line, through the shared parser."""
+    requests = parse_requests(matches, today=dt.datetime.now(zone).date())
+    for request in requests:
+        if request.date is not None and request.time is not None:
+            return dt.datetime.combine(request.date, request.time, tzinfo=zone)
+    return None
+
+
 def make_handler(
     engine: Engine,
     *,
     token: str = "",
     book: ForecastBook | None = None,
+    supervisor: Supervisor | None = None,
 ) -> type[http.server.BaseHTTPRequestHandler]:
     """Build a request handler bound to one engine instance.
 
@@ -386,6 +470,8 @@ def make_handler(
             (``?jeton=…``), then in a cookie. Without it the page is refused.
         book: when set, every analysis served is journalled **server-side**, so
             a phone that loses its browser tab loses nothing.
+        supervisor: holds the watches started from the page. They run on the
+            server, so closing the tab does not cancel the T−75 check.
     """
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -467,6 +553,7 @@ def make_handler(
                 "compositions": form.get("compositions", [""])[0],
             }
 
+            action = form.get("action", ["analyser"])[0]
             body = ""
             try:
                 zone_info = resolve_timezone(zone)
@@ -476,7 +563,16 @@ def make_handler(
                     else dt.datetime.now(zone_info)
                 )
                 budget = float(budget_text) if budget_text.strip() else None
-                if matchs.strip():
+                if action == "bilan":
+                    body = _render_ledger(book)
+                elif action == "suivre":
+                    body = _start_watch(
+                        supervisor,
+                        matches=matchs,
+                        zone=zone_info,
+                        bookmaker=bookmaker,
+                    )
+                elif matchs.strip():
                     result = analyse_form(
                         engine,
                         matches=matchs,
@@ -537,7 +633,12 @@ def serve(
         announcement says so plainly when TLS is off and the host is not local.
     ``book``
         server-side storage of every analysis served, so the phone holds none
-        of the state.
+        of the state. It is a plain append-only file: backing it up is copying
+        it, and restoring it is putting it back.
+
+    The **Suivre** button starts its watch on the server, so the T−75 check
+    happens whether or not the tab is still open. A watch does not survive a
+    restart of the server, and the page says so rather than implying otherwise.
 
     API keys never reach the browser in any configuration: the engine reads
     them from the server's own environment, and no page template renders them.
@@ -548,7 +649,9 @@ def serve(
         daemon_threads = True
 
     scheme = "https" if certfile and keyfile else "http"
-    with Server((host, port), make_handler(engine, token=token, book=book)) as httpd:
+    supervisor = Supervisor(engine, book=book)
+    handler = make_handler(engine, token=token, book=book, supervisor=supervisor)
+    with Server((host, port), handler) as httpd:
         if scheme == "https":
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(certfile=str(certfile), keyfile=str(keyfile))

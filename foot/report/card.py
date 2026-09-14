@@ -12,6 +12,7 @@ and **confidence is not probability**.
 
 from __future__ import annotations
 
+import datetime as dt
 from zoneinfo import ZoneInfo
 
 from foot.analysis.dossier import FindingKind
@@ -19,8 +20,9 @@ from foot.analysis.engine import MatchAnalysis
 from foot.analysis.request import resolve_timezone
 from foot.analysis.rubrics import RubricImplementation, RubricStatus
 from foot.markets.selection import DecisionStatus
+from foot.provenance import utcnow
 
-__all__ = ["render_card"]
+__all__ = ["render_card", "render_rubric_grid", "render_rubric_provenance"]
 
 _WIDTH = 84
 
@@ -340,6 +342,56 @@ def _corroboration(analysis: MatchAnalysis) -> str:
         f"{crossed} fait(s) confirmé(s) par deux fournisseurs indépendants, "
         f"{alone} sur une source unique"
     )
+
+
+def render_rubric_provenance(analysis: MatchAnalysis) -> str:
+    """Per rubric: the datum used, **where it came from and how old it is**.
+
+    The grid says whether a rubric is covered; this says on what. A rubric
+    answered from a source retrieved three weeks ago is not in the same state as
+    the same rubric answered from this morning's fetch, and only one of the two
+    deserves to carry a decision.
+    """
+    if not analysis.rubrics:
+        return "Aucune grille évaluée."
+    ledger = analysis.ledger
+    lines = [
+        "PROVENANCE ET FRAÎCHEUR, RUBRIQUE PAR RUBRIQUE",
+        "  état / donnée / source / relevé — « — » signifie : rien, et rien n'est supposé",
+    ]
+    for assessment in analysis.rubrics:
+        mark = f"{assessment.status.symbol} {assessment.implementation.symbol}"
+        head = f"  {mark} R{assessment.rubric.number:02d} {assessment.rubric.title}"
+        lines.append(head)
+        if assessment.blocker:
+            lines.append(f"        indisponible — {assessment.blocker}")
+            continue
+        lines.append(f"        donnée   : {assessment.data_used or '—'}")
+        entries = [e for key in assessment.evidence_keys for e in ledger.for_key(key)]
+        if not entries:
+            lines.append(
+                "        source   : aucune preuve citée — rubrique traitée par le "
+                "modèle lui-même, pas par une donnée externe"
+            )
+            continue
+        for entry in entries[:3]:
+            age = _freshness(entry.retrieved_at)
+            lines.append(
+                f"        source   : {entry.source} · relevé {age} · "
+                f"[{entry.status.value}]"
+            )
+    return "\n".join(lines)
+
+
+def _freshness(retrieved_at: dt.datetime) -> str:
+    """How long ago, in words an operator can act on."""
+    delta = utcnow() - retrieved_at
+    hours = delta.total_seconds() / 3600.0
+    if hours < 1.0:
+        return f"il y a {int(delta.total_seconds() // 60)} min"
+    if hours < 48.0:
+        return f"il y a {hours:.0f} h"
+    return f"il y a {delta.days} j ({retrieved_at:%d/%m %H:%M %Z})"
 
 
 def render_rubric_grid(analysis: MatchAnalysis) -> str:

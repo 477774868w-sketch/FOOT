@@ -486,19 +486,21 @@ def _running(**kwargs: object) -> Iterator[str]:
             thread.join(timeout=5)
 
 
-def test_the_first_screen_is_matches_date_bookmaker_and_one_button() -> None:
-    """Le téléphone doit montrer l'essentiel, pas le formulaire entier."""
+def test_the_first_screen_is_matches_date_bookmaker_and_three_actions() -> None:
+    """Le téléphone montre l'essentiel : saisir, puis Analyser, Suivre, Bilan."""
     page = render_form()
+    actions = page.index('class="actions"')
     order = [
         page.index('id="matchs"'),
         page.index('id="date"'),
         page.index('id="book"'),
-        page.index('<button type="submit">'),
+        actions,
     ]
     assert order == sorted(order), "l'ordre de l'écran suit le geste de l'opérateur"
-    assert page.count('<button type="submit">') == 1
-    assert page.index('<button type="submit">') < page.index('id="budget"'), (
-        "budget, combiné et contexte sont repliés sous le bouton"
+    for name in ("analyser", "suivre", "bilan"):
+        assert f'value="{name}"' in page, name
+    assert actions < page.index('id="budget"'), (
+        "budget, combiné et contexte sont repliés sous les boutons"
     )
 
 

@@ -73,7 +73,11 @@ from foot.models.dixon_coles import DixonColesModel
 from foot.models.poisson import PoissonModel
 from foot.provenance import utcnow
 from foot.ratings.elo import EloRatingSystem
-from foot.report.card import render_card, render_rubric_grid
+from foot.report.card import (
+    render_card,
+    render_rubric_grid,
+    render_rubric_provenance,
+)
 from foot.report.table import render_summary
 from foot.report.web import access_token, serve
 from foot.simulation.season import SeasonSimulator
@@ -563,6 +567,9 @@ def command_analyser(
         if args.rubriques:
             print()
             print(render_rubric_grid(analysis))
+        if getattr(args, "provenance", False):
+            print()
+            print(render_rubric_provenance(analysis))
 
     decisions = [
         (f"{a.resolved.fixture.home} – {a.resolved.fixture.away}", a.decision)
@@ -1027,6 +1034,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="proposer un combiné d'au plus N sélections")
     analyser.add_argument("--rubriques", action="store_true",
                           help="afficher la grille des 22 rubriques par rencontre")
+    analyser.add_argument("--provenance", action="store_true",
+                          help="pour chaque rubrique : la donnée, sa source et sa fraîcheur")
     analyser.add_argument("--court", action="store_true", help="fiches abrégées")
     analyser.add_argument(
         "--journal",
@@ -1140,7 +1149,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--journal",
         nargs="?",
         const=str(DEFAULT_BOOK),
-        help="conserver chaque analyse servie, côté serveur",
+        help="conserver chaque analyse servie côté serveur (bouton « Bilan »)",
     )
     _data_options(web)
     web.set_defaults(handler=command_web)

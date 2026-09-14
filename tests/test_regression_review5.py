@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import io
 import tempfile
+import threading
+from contextlib import redirect_stdout
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -32,12 +35,14 @@ from foot.analysis.engine import Engine, EngineConfig
 from foot.analysis.ledgerbook import Forecast, ForecastBook
 from foot.analysis.measure import ClosingState, closing_key, measure
 from foot.analysis.quotes import offer_for_key
+from foot.analysis.supervisor import Supervisor, WatchHandle
 from foot.analysis.watch import (
     WATCH_CACHE_TTL,
     WatchPlan,
     WatchReport,
     watch_until_kickoff,
 )
+from foot.cli import build_parser, command_mesurer
 from foot.collect.base import Capability
 from foot.collect.cache import Cache
 from foot.collect.footballdata_org import FootballDataOrgProvider
@@ -45,6 +50,8 @@ from foot.collect.oddsapi import _quotes_for, parse_odds
 from foot.collect.registry import Registry
 from foot.domain import Fixture
 from foot.provenance import Confidence
+from foot.report.card import render_rubric_provenance
+from foot.report.web import _render_ledger
 
 PARIS = ZoneInfo("Europe/Paris")
 KICKOFF = dt.datetime(2026, 9, 14, 20, 45, tzinfo=PARIS)
@@ -601,3 +608,156 @@ def test_g10d_a_replay_is_reported_as_retrospective_not_as_a_forecast() -> None:
     assert not default.resolved and len(default.excluded) == 1
     asked = measure(_book(replay), results=results, include_retrospective=True)
     assert len(asked.resolved) == 1
+
+
+def test_g9d_the_whole_command_runs_with_a_closing_source_available() -> None:
+    """Le parcours complet de « foot mesurer », clôtures comprises."""
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        (root / "resultats.csv").write_text(
+            "date,home,away,home_goals,away_goals\n"
+            "14/09/2026,Club A,Club B,2,1\n"
+            "14/09/2026,Club C,Club D,0,0\n",
+            encoding="utf-8",
+        )
+        (root / "clotures.csv").write_text(
+            "date,home,away,marche,cote,competition\n"
+            "14/09/2026,Club A,Club B,1X2:H,1.90,rejeu\n"
+            "14/09/2026,Club C,Club D,1X2:H,2.40,rejeu\n",
+            encoding="utf-8",
+        )
+        book = ForecastBook(root / "journal.jsonl")
+        for home, away in (("Club A", "Club B"), ("Club C", "Club D")):
+            entry = dataclasses.replace(
+                _forecast(home, away, market_key="1X2:H", odds=2.10),
+                competition="rejeu",
+                kickoff_at=dt.datetime(2026, 9, 14, 20, 45, tzinfo=UTC).isoformat(),
+                as_of=dt.datetime(2026, 9, 13, 9, tzinfo=UTC),
+                recorded_at=dt.datetime(2026, 9, 13, 9, tzinfo=UTC),
+            )
+            book.append(entry)
+
+        args = build_parser().parse_args(
+            [
+                "mesurer",
+                "--fichier", str(root / "journal.jsonl"),
+                "--resultats-csv", str(root / "resultats.csv"),
+                "--clotures-csv", str(root / "clotures.csv"),
+                "--import-competition", "rejeu",
+                "--bookmaker", "Doublure",
+                "--no-cache",
+            ]
+        )
+        printed = io.StringIO()
+        with redirect_stdout(printed):
+            code = command_mesurer(args)
+        output = printed.getvalue()
+
+    assert code == 0
+    assert "2 rencontre(s) résolue(s)" in output
+    # The command really collected: a served state, an edge actually computed.
+    assert "clôtures.csv" in output or "clotures.csv" in output
+    assert "Écart moyen au prix de clôture" in output
+    assert "2 recommandation(s) réglée(s)" in output
+
+
+# --------------------------------------------------------------------------- #
+# 11. Le téléphone : trois actions, un suivi qui survit à l'onglet
+# --------------------------------------------------------------------------- #
+
+
+def test_g11_the_watch_survives_the_tab_that_started_it() -> None:
+    """Un suivi lancé depuis le téléphone tourne sur le serveur."""
+    done = threading.Event()
+    observed: list[str] = []
+
+    def fake_watch(handle: WatchHandle) -> None:
+        observed.append(handle.matches)
+        with handle.lock:
+            handle.report = WatchReport(
+                fixture=handle.matches,
+                plan=WatchPlan(kickoff=handle.kickoff),
+                attempts=[],
+                stopped_because="doublure",
+            )
+            handle.finished = True
+        done.set()
+
+    supervisor = Supervisor(_engine())
+    handle = supervisor.start(
+        matches=_LINE,
+        kickoff=KICKOFF,
+        runner=fake_watch,
+    )
+    assert done.wait(timeout=5), "le suivi doit démarrer sans bloquer la requête"
+    assert observed == [_LINE]
+    assert supervisor.get(handle.identifier) is handle
+    assert "doublure" in (handle.report.stopped_because if handle.report else "")
+    assert "1 suivi(s) côté serveur" in supervisor.render()
+
+
+def test_g11b_a_watch_that_fails_says_so_instead_of_looking_idle() -> None:
+    done = threading.Event()
+
+    def exploding(handle: WatchHandle) -> None:
+        try:
+            raise RuntimeError("réseau coupé")
+        except RuntimeError as error:
+            with handle.lock:
+                handle.error = f"{type(error).__name__}: {error}"
+                handle.finished = True
+        done.set()
+
+    supervisor = Supervisor(_engine())
+    handle = supervisor.start(matches=_LINE, kickoff=KICKOFF, runner=exploding)
+    assert done.wait(timeout=5)
+    assert "ARRÊTÉ" in handle.summary()
+    assert "réseau coupé" in handle.summary()
+
+
+def test_g11c_an_idle_supervisor_states_what_it_does_and_does_not_promise() -> None:
+    rendered = Supervisor(_engine()).render()
+    assert "continue même si vous fermez l'onglet" in rendered
+    assert "s'arrête si le serveur s'arrête" in rendered, (
+        "la limite doit être écrite, pas sous-entendue"
+    )
+
+
+def test_g11d_the_bilan_screen_shows_the_journal_and_how_to_restore_it() -> None:
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "journal.jsonl"
+        book = ForecastBook(path)
+        book.append(_forecast("Club A", "Club B", market_key="1X2:H", odds=2.0))
+        body = _render_ledger(book)
+        assert "journal.jsonl" in body
+        assert "1 ligne(s)" in body
+        assert "Sauvegarde" in body and "restaure" in body
+        assert "Club A" in body
+
+        # A journal file copied and put back reads identically — that is the
+        # whole backup story, and it is worth proving rather than asserting.
+        copy = Path(folder) / "copie.jsonl"
+        copy.write_bytes(path.read_bytes())
+        restored = list(ForecastBook(copy))
+        assert [f.to_json() for f in restored] == [f.to_json() for f in book]
+
+
+def test_g11e_the_bilan_screen_is_honest_when_no_journal_is_kept() -> None:
+    body = _render_ledger(None)
+    assert "Aucun journal" in body
+    assert "--journal" in body
+
+
+def test_g12_each_rubric_names_its_source_and_its_freshness() -> None:
+    """Une rubrique couverte ce matin et une couverte il y a trois semaines
+    ne sont pas dans le même état, et une seule mérite de porter une décision."""
+    run = _engine().run(_LINE, as_of=KICKOFF - dt.timedelta(days=1))
+    text = render_rubric_provenance(run.analyses[0])
+    assert "PROVENANCE ET FRAÎCHEUR" in text
+    assert "relevé il y a" in text, "chaque preuve citée porte son âge"
+    # A rubric with no evidence says so rather than borrowing someone else's.
+    assert "aucune preuve citée" in text
+    # A blocked rubric states the remedy instead of a source.
+    assert "indisponible —" in text
+    for number in (1, 7, 22):
+        assert f"R{number:02d}" in text
